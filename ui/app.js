@@ -102,7 +102,6 @@ const gitCommitMessage = document.querySelector("#git-commit-message");
 const gitCommitButton = document.querySelector("#git-commit-button");
 const sidebarResizer = document.querySelector("#sidebar-resizer");
 const workspaceResizer = document.querySelector("#workspace-resizer");
-const CODEX_PLUGIN_ID = "io.github.w3ti.lyrnova.ai.codex";
 const PLUGIN_PERMISSION_LABELS = Object.freeze({
   workspace_read: ["Ler o workspace", "Acessa arquivos dentro do projeto aberto."],
   workspace_write: ["Alterar o workspace", "Modifica arquivos dentro do projeto aberto."],
@@ -235,7 +234,8 @@ let codeEditor = null;
 const editorModels = new Map();
 let activeAgentThreadId = null;
 let agentTurnRunning = false;
-let codexPluginEnabled = false;
+let aiProviderEnabled = false;
+let activeAiProvider = null;
 let agentEventsBound = false;
 let ideSettings = readIdeSettings();
 const streamedAgentMessages = new Map();
@@ -638,6 +638,7 @@ async function updatePluginCatalog() {
     renderTrustedPluginCatalog(entries);
     const plugins = await invoke("plugin_list");
     renderPluginCatalog(plugins);
+    await refreshAiProviderAvailability();
     setPluginInstallStatus("Catálogo autenticado e atualizado.", "success");
     announce("Catálogo de plugins atualizado");
   } catch (error) {
@@ -677,7 +678,7 @@ async function confirmPluginInstall() {
     pluginReviewDialog.close();
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
-    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    await refreshAiProviderAvailability();
     setPluginInstallStatus("Plugin instalado e revisado. Ele permanece desabilitado até você ativá-lo.", "success");
     announce("Plugin instalado e mantido desabilitado");
   } catch (error) {
@@ -698,7 +699,7 @@ async function setPluginEnabled(pluginId, enabled) {
     const plugins = await invoke("plugin_set_enabled", { pluginId, enabled });
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
-    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    await refreshAiProviderAvailability();
     setPluginInstallStatus(`Plugin ${enabled ? "ativado" : "desabilitado"}.`, "success");
   } catch (error) {
     setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
@@ -743,7 +744,7 @@ async function confirmPluginRemoval() {
     pluginRemoveDialog.close();
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
-    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    await refreshAiProviderAvailability();
     setPluginInstallStatus(`${removedName} e todas as suas versões locais foram removidos.`, "success");
     announce("Plugin externo removido");
   } catch (error) {
@@ -928,7 +929,7 @@ async function bindTerminalOutput() {
 }
 
 function switchActivity(panel) {
-  if (panel === "agent" && !codexPluginEnabled) {
+  if (panel === "agent" && !aiProviderEnabled) {
     announce("Instale e ative um plugin de IA para abrir conversas");
     return;
   }
@@ -1052,8 +1053,8 @@ function closePalette() {
 }
 
 function openAccount() {
-  if (!codexPluginEnabled) {
-    announce("O plugin Codex não está instalado e ativo");
+  if (!aiProviderEnabled) {
+    announce("Nenhum provider de IA está instalado e ativo");
     return;
   }
   closePalette();
@@ -1083,10 +1084,10 @@ function renderAccount(status) {
   if (!account) {
     profileAvatar.textContent = "↗";
     profileAvatar.classList.add("signed-out");
-    profileAccountName.textContent = "Entrar com OpenAI";
-    profileAccountPlan.textContent = "Conta e plano ChatGPT";
-    accountTitle.textContent = "Entrar com OpenAI";
-    accountCopy.textContent = "Use sua conta ChatGPT para acessar o agente. A autenticação acontece no navegador da OpenAI.";
+    profileAccountName.textContent = "Conectar conta";
+    profileAccountPlan.textContent = activeAiProvider?.name || "Provider de IA";
+    accountTitle.textContent = `Entrar com ${activeAiProvider?.name || "o provider de IA"}`;
+    accountCopy.textContent = "Use uma forma de autenticação oferecida pelo provider ativo para acessar o agente.";
     accountPrivacyTitle.textContent = "Sua senha nunca passa pelo Lyrnova";
     accountPrivacyCopy.textContent = "Tokens e cookies ficam fora do frontend.";
     loginOptions.hidden = false;
@@ -1105,7 +1106,7 @@ function renderAccount(status) {
   accountCopy.textContent = account.email
     ? `${account.email}${plan ? ` · Plano ${plan}` : ""}`
     : `${mode}${plan ? ` · Plano ${plan}` : ""}`;
-  accountPrivacyTitle.textContent = "Sessão gerenciada pelo Codex";
+  accountPrivacyTitle.textContent = `Sessão gerenciada por ${activeAiProvider?.name || "provider de IA"}`;
   accountPrivacyCopy.textContent = "O frontend recebe somente e-mail, tipo de conta e plano; credenciais não são expostas.";
   loginOptions.hidden = true;
   logoutButton.hidden = false;
@@ -1114,10 +1115,10 @@ function renderAccount(status) {
 function renderAccountUnavailable() {
   profileAvatar.textContent = "!";
   profileAvatar.classList.add("signed-out");
-  profileAccountName.textContent = "Codex indisponível";
+  profileAccountName.textContent = "Provider indisponível";
   profileAccountPlan.textContent = "Verifique a instalação local";
-  accountTitle.textContent = "Codex App Server indisponível";
-  accountCopy.textContent = "Não foi possível consultar a sessão local do Codex neste momento.";
+  accountTitle.textContent = "Provider de IA indisponível";
+  accountCopy.textContent = "Não foi possível consultar a sessão do provider ativo neste momento.";
   accountPrivacyTitle.textContent = "Nenhuma credencial foi acessada";
   accountPrivacyCopy.textContent = "A consulta falhou antes de disponibilizar dados de conta ao frontend.";
   loginOptions.hidden = true;
@@ -1125,7 +1126,7 @@ function renderAccountUnavailable() {
 }
 
 async function loadAgentAccount() {
-  if (!codexPluginEnabled) return;
+  if (!aiProviderEnabled) return;
   if (!invoke) {
     renderAccount(null);
     return;
@@ -1138,7 +1139,7 @@ async function loadAgentAccount() {
 }
 
 async function logoutAgentAccount() {
-  if (!invoke || !codexPluginEnabled) return;
+  if (!invoke || !aiProviderEnabled) return;
   logoutButton.disabled = true;
   try {
     renderAccount(await invoke("agent_logout"));
@@ -1504,7 +1505,7 @@ function showWorkspaceView(view, focusEditor = false) {
   settingsWorkspace.hidden = true;
   editorWorkspace.hidden = false;
   if (view === "agent") {
-    if (!codexPluginEnabled) {
+    if (!aiProviderEnabled) {
       announce("Instale e ative um plugin de IA para abrir conversas");
       return;
     }
@@ -2073,8 +2074,8 @@ async function bindAgentLogin() {
 }
 
 async function startAgentLogin(mode) {
-  if (!codexPluginEnabled) {
-    announce("O plugin Codex não está instalado e ativo");
+  if (!aiProviderEnabled) {
+    announce("Nenhum provider de IA está instalado e ativo");
     return;
   }
   if (!invoke) {
@@ -2088,14 +2089,14 @@ async function startAgentLogin(mode) {
   try {
     await invoke("agent_login_start", { mode });
   } catch {
-    integrationNote.textContent = "Já existe um login em andamento ou o Codex está indisponível.";
+    integrationNote.textContent = "Já existe um login em andamento ou o provider está indisponível.";
     setLoginButtonsDisabled(false);
   }
 }
 
 async function sendAgentMessage(text) {
-  if (!codexPluginEnabled) {
-    announce("O plugin Codex não está instalado e ativo");
+  if (!aiProviderEnabled) {
+    announce("Nenhum provider de IA está instalado e ativo");
     return;
   }
   if (!invoke) {
@@ -2115,11 +2116,16 @@ async function sendAgentMessage(text) {
     activeAgentThreadId = result.threadId;
   } catch (error) {
     setAgentBusy(false, "Indisponível");
-    const unavailable = error?.code === "codex_unavailable";
+    const unavailable = [
+      "codex_unavailable",
+      "provider_unavailable",
+      "provider_unsupported",
+      "provider_capability_unavailable",
+    ].includes(error?.code);
     transcript.append(createMessage(
       "agent",
       unavailable
-        ? "O Codex App Server não está disponível nesta máquina."
+        ? "O provider de IA selecionado não está disponível para esta conversa."
         : "Não foi possível concluir a conversa. Verifique a conta e tente novamente.",
     ));
     announce("Falha ao conversar com o agente");
@@ -2127,7 +2133,7 @@ async function sendAgentMessage(text) {
 }
 
 function resetThread() {
-  if (!codexPluginEnabled) {
+  if (!aiProviderEnabled) {
     announce("Instale e ative um plugin de IA para criar conversas");
     return;
   }
@@ -2327,7 +2333,7 @@ terminalForm.addEventListener("submit", (event) => {
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = prompt.value.trim();
-  if (!text || agentTurnRunning || !codexPluginEnabled) return;
+  if (!text || agentTurnRunning || !aiProviderEnabled) return;
   transcript.append(createMessage("user", text));
   prompt.value = "";
   prompt.style.height = "auto";
@@ -2356,14 +2362,14 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { closePalette(); appShell.dataset.sidebarOpen = "false"; }
   if (event.ctrlKey && event.key.toLowerCase() === "k") { event.preventDefault(); openPalette(); }
   if (event.ctrlKey && event.key === ",") { event.preventDefault(); switchActivity("settings"); }
-  if (event.ctrlKey && event.key.toLowerCase() === "n" && codexPluginEnabled) { event.preventDefault(); resetThread(); }
+  if (event.ctrlKey && event.key.toLowerCase() === "n" && aiProviderEnabled) { event.preventDefault(); resetThread(); }
   if (event.ctrlKey && event.key.toLowerCase() === "o") { event.preventDefault(); void openProjectDialog(); }
   if (event.ctrlKey && event.key === "`") { event.preventDefault(); toggleTerminal(); }
   if (event.ctrlKey && event.key === "1") { event.preventDefault(); showWorkspaceView("editor", true); }
   if (event.ctrlKey && event.key === "2") { event.preventDefault(); void openDocument(activeDocument); }
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "e") { event.preventDefault(); switchActivity("explorer"); }
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "g") { event.preventDefault(); switchActivity("git"); }
-  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a" && codexPluginEnabled) { event.preventDefault(); switchActivity("agent"); }
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a" && aiProviderEnabled) { event.preventDefault(); switchActivity("agent"); }
 });
 
 if (narrowWorkspace.matches) toggleInspector(false);
@@ -2376,8 +2382,10 @@ bindWindowControls();
 bindPanelResizers();
 void bindTerminalOutput();
 
-function applyCodexPluginAvailability(enabled) {
-  codexPluginEnabled = enabled;
+function applyAiProviderAvailability(provider) {
+  activeAiProvider = provider;
+  const enabled = Boolean(provider);
+  aiProviderEnabled = enabled;
   appShell.dataset.aiPluginEnabled = String(enabled);
   document.querySelectorAll(".ai-plugin-control").forEach((element) => {
     element.hidden = !enabled;
@@ -2391,22 +2399,42 @@ function applyCodexPluginAvailability(enabled) {
   window.requestAnimationFrame(() => codeEditor?.layout());
 }
 
-async function loadPluginAvailability() {
+async function refreshAiProviderAvailability() {
   if (!invoke) {
-    renderPluginCatalog([]);
-    applyCodexPluginAvailability(false);
+    applyAiProviderAvailability(null);
     return false;
   }
   try {
-    const plugins = await invoke("plugin_list");
+    const provider = await invoke("ai_provider_current");
+    applyAiProviderAvailability(provider);
+    if (provider) {
+      await bindAgentEvents();
+      void loadAgentAccount();
+    }
+    return Boolean(provider);
+  } catch {
+    applyAiProviderAvailability(null);
+    return false;
+  }
+}
+
+async function loadPluginAvailability() {
+  if (!invoke) {
+    renderPluginCatalog([]);
+    applyAiProviderAvailability(null);
+    return false;
+  }
+  try {
+    const [plugins, provider] = await Promise.all([
+      invoke("plugin_list"),
+      invoke("ai_provider_current"),
+    ]);
     renderPluginCatalog(plugins);
-    const codex = plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID);
-    const enabled = Boolean(codex?.installed && codex?.enabled);
-    applyCodexPluginAvailability(enabled);
-    return enabled;
+    applyAiProviderAvailability(provider);
+    return Boolean(provider);
   } catch {
     renderPluginCatalog([]);
-    applyCodexPluginAvailability(false);
+    applyAiProviderAvailability(null);
     return false;
   }
 }
@@ -2425,13 +2453,13 @@ async function loadTrustedPluginCatalog() {
 }
 
 async function bindAgentEvents() {
-  if (agentEventsBound || !codexPluginEnabled) return;
+  if (agentEventsBound || !aiProviderEnabled) return;
   agentEventsBound = true;
   await Promise.all([bindAgentStream(), bindAgentLogin()]);
 }
 
 async function initializeWorkspace() {
-  const [hasProject, hasCodex] = await Promise.all([
+  const [hasProject, hasAiProvider] = await Promise.all([
     loadProjectSummary(),
     loadPluginAvailability(),
     loadTrustedPluginCatalog(),
@@ -2443,7 +2471,7 @@ async function initializeWorkspace() {
     if (firstFile) await openDocument(firstFile.path, false);
   }
   appShell.dataset.chatOpen = "false";
-  if (hasCodex) {
+  if (hasAiProvider) {
     await bindAgentEvents();
     void loadAgentAccount();
   }

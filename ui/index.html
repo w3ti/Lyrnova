@@ -18,7 +18,7 @@
         <button class="activity-button ai-plugin-control" type="button" data-activity="agent" title="Conversas de IA" aria-label="Conversas de IA" aria-pressed="false" hidden>◇</button>
         <span class="activity-spacer"></span>
         <button class="activity-button" type="button" data-activity="settings" title="Configurações" aria-label="Configurações" aria-pressed="false">⚙</button>
-        <button class="activity-button ai-plugin-control" type="button" data-action="open-account" title="Conta do plugin Codex" aria-label="Conta do plugin Codex" hidden>◎</button>
+        <button class="activity-button ai-plugin-control" type="button" data-action="open-account" title="Conta do provider de IA" aria-label="Conta do provider de IA" hidden>◎</button>
       </nav>
 
       <aside class="sidebar" id="project-sidebar" aria-label="Painel lateral">
@@ -92,7 +92,7 @@
         </section>
 
         <footer class="sidebar-footer ai-plugin-control" hidden>
-          <button class="profile-button" type="button" data-action="open-account" aria-haspopup="dialog"><span class="avatar signed-out" id="profile-avatar" aria-hidden="true">↗</span><span><strong id="profile-account-name">Verificando conta…</strong><small id="profile-account-plan">Codex App Server</small></span><span aria-hidden="true">›</span></button>
+          <button class="profile-button" type="button" data-action="open-account" aria-haspopup="dialog"><span class="avatar signed-out" id="profile-avatar" aria-hidden="true">↗</span><span><strong id="profile-account-name">Verificando conta…</strong><small id="profile-account-plan">Provider de IA</small></span><span aria-hidden="true">›</span></button>
         </footer>
       </aside>
       <div class="panel-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="Redimensionar barra lateral" aria-orientation="vertical" tabindex="0"></div>
@@ -175,7 +175,7 @@
               </section>
             </div>
           </main>
-          <main class="conversation ai-plugin-control" aria-label="Conversa com o plugin Codex" hidden>
+          <main class="conversation ai-plugin-control" aria-label="Conversa com o provider de IA" hidden>
             <header class="thread-header">
               <div><p class="eyebrow">Implementação</p><h1>Redesenhar workspace inicial</h1></div>
               <span class="agent-status" id="agent-status"><span class="status-dot"></span><span>Pronto</span></span>
@@ -192,7 +192,7 @@
                 <p>Vou preservar a fundação Tauri e substituir a navegação remota por um workspace local. Primeiro mapeei os componentes e a fronteira de segurança.</p>
                 <div class="activity-card complete"><span class="activity-icon" aria-hidden="true">✓</span><span><strong>Leu 8 arquivos</strong><small>Configuração, UI e documentação</small></span><button type="button">Ver contexto</button></div>
                 <div class="activity-card complete"><span class="activity-icon" aria-hidden="true">↯</span><span><strong>Atualizou a arquitetura</strong><small>11 arquivos alterados · +684 −201</small></span><button type="button" data-action="show-changes">Abrir diff</button></div>
-                <p>O chat usa o Codex App Server em sandbox somente leitura. Escritas, comandos e rede controlada exigem uma decisão explícita no cartão de aprovação do Lyrnova.</p>
+                <p>O chat usa o provider de IA ativo em sandbox somente leitura. Escritas, comandos e rede controlada exigem uma decisão explícita no cartão de aprovação do Lyrnova.</p>
               </article>
             </div>
 
@@ -204,7 +204,7 @@
                   <button class="icon-button" type="button" aria-label="Adicionar contexto">＋</button>
                   <button class="mode-button" type="button"><span class="status-dot"></span> Local</button>
                   <button class="mode-button" type="button">Auto <span aria-hidden="true">⌄</span></button>
-                  <button class="mode-button" type="button">Codex · perguntar antes <span aria-hidden="true">⌄</span></button>
+                  <button class="mode-button" type="button">Provider ativo · perguntar antes <span aria-hidden="true">⌄</span></button>
                 </div>
                 <button class="send-button" type="submit" aria-label="Enviar mensagem">↑</button>
               </div>
@@ -283,7 +283,7 @@
         <button type="button" data-command="show-changes"><span>◧</span><strong>Abrir alterações</strong></button>
         <button type="button" data-command="open-editor"><span>{ }</span><strong>Abrir editor</strong><kbd>Ctrl 2</kbd></button>
         <button type="button" data-command="open-settings"><span>⚙</span><strong>Abrir configurações</strong><kbd>Ctrl ,</kbd></button>
-        <button class="ai-plugin-control" type="button" data-command="open-account" hidden><span>↗</span><strong>Conta do Codex</strong></button>
+        <button class="ai-plugin-control" type="button" data-command="open-account" hidden><span>↗</span><strong>Conta do provider</strong></button>
       </section>
     </div>
 
@@ -293,7 +293,7 @@
         <div><p class="eyebrow">Conta do agente</p><h2 id="account-title">Entrar com OpenAI</h2></div>
         <button class="icon-button" type="button" data-action="close-account" aria-label="Fechar">×</button>
       </div>
-      <p class="dialog-copy" id="account-copy">Verificando a sessão local do Codex. O Lyrnova recebe somente os dados necessários para identificar a conta e o plano.</p>
+      <p class="dialog-copy" id="account-copy">Verificando a sessão do provider ativo. O Lyrnova recebe somente os dados necessários para identificar a conta e o plano.</p>
       <div class="privacy-note"><span aria-hidden="true">◇</span><span><strong id="account-privacy-title">Credenciais protegidas</strong><small id="account-privacy-copy">Tokens, cookies e senhas ficam fora do frontend.</small></span></div>
       <div class="login-options" id="login-options">
         <button class="login-option primary" type="button" data-login="browser"><span aria-hidden="true">↗</span><span><strong>Continuar no navegador</strong><small>Fluxo recomendado para desktop</small></span><span aria-hidden="true">›</span></button>

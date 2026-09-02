@@ -226,6 +226,9 @@ pub enum AgentStreamEvent {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum AgentRuntimeError {
     CodexUnavailable,
+    ProviderUnavailable,
+    ProviderUnsupported,
+    ProviderCapabilityUnavailable,
     ProcessFailed,
     TransportClosed,
     InvalidProtocol,

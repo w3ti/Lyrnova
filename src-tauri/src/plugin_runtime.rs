@@ -1,24 +1,35 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    process::Child,
-    sync::Mutex,
+    process::{Child, ChildStdin},
+    sync::{Mutex, mpsc::Receiver},
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
 use std::{
     ffi::OsString,
     fs::{File, OpenOptions},
-    io::{self, Read},
-    process::{Command, Stdio},
+    io::{self, BufReader, Read},
+    process::{ChildStdout, Command, Stdio},
+    sync::mpsc,
 };
 
 use semver::Version;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
-    plugin_manifest::{PluginPermission, PluginRuntime, permissions_exactly_match},
+    plugin_manifest::{
+        PluginCapability, PluginPermission, PluginRuntime, permissions_exactly_match,
+    },
     plugin_package::discover_installed_packages,
+    plugin_protocol::{
+        EXTERNAL_PLUGIN_PROTOCOL_VERSION, HostPluginFrame, PluginEvent, PluginHostFrame,
+        PluginProtocolError, PluginResponse, operation_matches, read_plugin_frame,
+        write_host_frame,
+    },
 };
 
 const RUNTIME_DIRECTORY: &str = ".runtime";
@@ -36,6 +47,10 @@ const MAX_FILE_BYTES: libc::rlim_t = 64 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_ADDRESS_SPACE_BYTES: libc::rlim_t = 2 * 1024 * 1024 * 1024;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+const MAX_QUEUED_EVENTS: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalRuntimeSpec {
@@ -43,6 +58,7 @@ pub struct ExternalRuntimeSpec {
     pub version: Version,
     pub package_path: PathBuf,
     pub entrypoint: String,
+    pub capabilities: BTreeSet<PluginCapability>,
     pub permissions: BTreeSet<PluginPermission>,
 }
 
@@ -56,6 +72,12 @@ pub enum PluginRuntimeError {
     InvalidPackage,
     RuntimeDirectoryUnavailable,
     SpawnFailed,
+    ProtocolViolation,
+    TransportClosed,
+    RequestTimeout,
+    RuntimeNotRunning,
+    CapabilityDenied,
+    PluginRejected,
     StopFailed,
     StateUnavailable,
 }
@@ -108,36 +130,201 @@ impl RuntimePolicy {
 
 struct RunningPlugin {
     child: Child,
+    stdin: Option<ChildStdin>,
+    frames: Option<Receiver<Result<PluginHostFrame, PluginProtocolError>>>,
+    reader: Option<JoinHandle<()>>,
+    spec: ExternalRuntimeSpec,
+    events: VecDeque<PluginEvent>,
     session_path: PathBuf,
 }
 
 impl RunningPlugin {
     fn stop(mut self) -> Result<(), PluginRuntimeError> {
-        let running = self
-            .child
-            .try_wait()
-            .map_err(|_| PluginRuntimeError::StopFailed)?
-            .is_none();
-        if running {
-            self.child
-                .kill()
-                .map_err(|_| PluginRuntimeError::StopFailed)?;
+        if let Some(stdin) = &mut self.stdin {
+            let _ = write_host_frame(stdin, &HostPluginFrame::Shutdown);
         }
+        self.stdin.take();
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while Instant::now() < deadline {
+            if self
+                .child
+                .try_wait()
+                .map_err(|_| PluginRuntimeError::StopFailed)?
+                .is_some()
+            {
+                self.frames.take();
+                self.join_reader();
+                let _ = fs::remove_dir_all(&self.session_path);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.child
+            .kill()
+            .map_err(|_| PluginRuntimeError::StopFailed)?;
         self.child
             .wait()
             .map_err(|_| PluginRuntimeError::StopFailed)?;
+        self.frames.take();
+        self.join_reader();
         let _ = fs::remove_dir_all(&self.session_path);
         Ok(())
+    }
+
+    fn request(
+        &mut self,
+        capability: PluginCapability,
+        operation: String,
+        payload: Value,
+    ) -> Result<PluginResponse, PluginRuntimeError> {
+        if !self.spec.capabilities.contains(&capability) {
+            return Err(PluginRuntimeError::CapabilityDenied);
+        }
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or(PluginRuntimeError::TransportClosed)?;
+        write_host_frame(
+            stdin,
+            &HostPluginFrame::Request {
+                request_id: request_id.clone(),
+                capability,
+                operation,
+                payload,
+            },
+        )
+        .map_err(map_protocol_error)?;
+
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(PluginRuntimeError::RequestTimeout)?;
+            let frame = self
+                .frames
+                .as_ref()
+                .ok_or(PluginRuntimeError::TransportClosed)?
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => {
+                        PluginRuntimeError::RequestTimeout
+                    }
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        PluginRuntimeError::TransportClosed
+                    }
+                })?
+                .map_err(map_protocol_error)?;
+            match frame {
+                PluginHostFrame::Response {
+                    request_id: response_id,
+                    capability: response_capability,
+                    result,
+                } if response_id == request_id && response_capability == capability => {
+                    return Ok(PluginResponse { capability, result });
+                }
+                PluginHostFrame::Error {
+                    request_id: response_id,
+                    capability: response_capability,
+                    ..
+                } if response_id == request_id && response_capability == capability => {
+                    return Err(PluginRuntimeError::PluginRejected);
+                }
+                PluginHostFrame::Event {
+                    capability,
+                    event,
+                    payload,
+                } if self.spec.capabilities.contains(&capability)
+                    && self.events.len() < MAX_QUEUED_EVENTS =>
+                {
+                    self.events.push_back(PluginEvent {
+                        capability,
+                        event,
+                        payload,
+                    });
+                }
+                _ => return Err(PluginRuntimeError::ProtocolViolation),
+            }
+        }
+    }
+
+    fn drain_events(&mut self) -> Result<Vec<PluginEvent>, PluginRuntimeError> {
+        loop {
+            match self
+                .frames
+                .as_ref()
+                .ok_or(PluginRuntimeError::TransportClosed)?
+                .try_recv()
+            {
+                Ok(Ok(PluginHostFrame::Event {
+                    capability,
+                    event,
+                    payload,
+                })) if self.spec.capabilities.contains(&capability)
+                    && self.events.len() < MAX_QUEUED_EVENTS =>
+                {
+                    self.events.push_back(PluginEvent {
+                        capability,
+                        event,
+                        payload,
+                    });
+                }
+                Ok(Ok(_)) => return Err(PluginRuntimeError::ProtocolViolation),
+                Ok(Err(error)) => return Err(map_protocol_error(error)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(PluginRuntimeError::TransportClosed);
+                }
+            }
+        }
+        Ok(self.events.drain(..).collect())
+    }
+
+    fn join_reader(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
 impl Drop for RunningPlugin {
     fn drop(&mut self) {
+        self.stdin.take();
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        self.frames.take();
+        self.join_reader();
         let _ = fs::remove_dir_all(&self.session_path);
+    }
+}
+
+fn map_protocol_error(error: PluginProtocolError) -> PluginRuntimeError {
+    match error {
+        PluginProtocolError::Io | PluginProtocolError::Closed => {
+            PluginRuntimeError::TransportClosed
+        }
+        PluginProtocolError::FrameTooLarge
+        | PluginProtocolError::InvalidFrame
+        | PluginProtocolError::InvalidValue => PluginRuntimeError::ProtocolViolation,
+    }
+}
+
+fn validate_handshake(
+    frame: PluginHostFrame,
+    expected_capabilities: &BTreeSet<PluginCapability>,
+) -> Result<(), PluginRuntimeError> {
+    match frame {
+        PluginHostFrame::Ready {
+            protocol_version,
+            capabilities,
+        } if protocol_version == EXTERNAL_PLUGIN_PROTOCOL_VERSION
+            && capabilities.iter().copied().collect::<BTreeSet<_>>() == *expected_capabilities =>
+        {
+            Ok(())
+        }
+        _ => Err(PluginRuntimeError::ProtocolViolation),
     }
 }
 
@@ -194,6 +381,7 @@ impl PluginRuntimeService {
                     .try_wait()
                     .map_err(|_| PluginRuntimeError::StateUnavailable)?
                     .is_none()
+                    && existing.spec == spec
                 {
                     return Ok(());
                 }
@@ -213,43 +401,136 @@ impl PluginRuntimeService {
             let mut command = Command::new(BWRAP_PATH);
             command
                 .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null());
             #[cfg(test)]
             command.stderr(Stdio::inherit());
             apply_resource_limits(&mut command);
-            let child = match command.spawn() {
+            let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(_) => {
                     let _ = fs::remove_dir_all(&session_path);
                     return Err(PluginRuntimeError::SpawnFailed);
                 }
             };
-            let mut child = child;
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            match child.try_wait() {
-                Ok(None) => {}
-                Ok(Some(_)) => {
-                    let _ = fs::remove_dir_all(&session_path);
-                    return Err(PluginRuntimeError::SpawnFailed);
+            let Some(stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&session_path);
+                return Err(PluginRuntimeError::SpawnFailed);
+            };
+            let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&session_path);
+                return Err(PluginRuntimeError::SpawnFailed);
+            };
+            let (frames, reader) = spawn_protocol_reader(stdout);
+            let capabilities = spec.capabilities.clone();
+            let mut runtime = RunningPlugin {
+                child,
+                stdin: Some(stdin),
+                frames: Some(frames),
+                reader: Some(reader),
+                spec: spec.clone(),
+                events: VecDeque::new(),
+                session_path,
+            };
+            let initialize = HostPluginFrame::Initialize {
+                protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION,
+                plugin_id: spec.id.clone(),
+                plugin_version: spec.version.to_string(),
+                capabilities: capabilities.iter().copied().collect(),
+                permissions: spec.permissions.iter().copied().collect(),
+            };
+            let handshake = runtime
+                .stdin
+                .as_mut()
+                .ok_or(PluginRuntimeError::TransportClosed)
+                .and_then(|stdin| write_host_frame(stdin, &initialize).map_err(map_protocol_error))
+                .and_then(|()| {
+                    runtime
+                        .frames
+                        .as_ref()
+                        .ok_or(PluginRuntimeError::TransportClosed)?
+                        .recv_timeout(HANDSHAKE_TIMEOUT)
+                        .map_err(|error| match error {
+                            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                                PluginRuntimeError::RequestTimeout
+                            }
+                            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                                PluginRuntimeError::TransportClosed
+                            }
+                        })?
+                        .map_err(map_protocol_error)
+                });
+            match handshake.and_then(|frame| validate_handshake(frame, &capabilities)) {
+                Ok(()) => {}
+                Err(PluginRuntimeError::ProtocolViolation) => {
+                    let _ = runtime.stop();
+                    return Err(PluginRuntimeError::ProtocolViolation);
                 }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = fs::remove_dir_all(&session_path);
-                    return Err(PluginRuntimeError::SpawnFailed);
+                Err(error) => {
+                    let _ = runtime.stop();
+                    return Err(error);
                 }
             }
-            running.insert(
-                spec.id,
-                RunningPlugin {
-                    child,
-                    session_path,
-                },
-            );
+            running.insert(spec.id.clone(), runtime);
             Ok(())
         }
+    }
+
+    pub fn request(
+        &self,
+        plugin_id: &str,
+        capability: PluginCapability,
+        operation: String,
+        payload: Value,
+    ) -> Result<PluginResponse, PluginRuntimeError> {
+        if !operation_matches(capability, &operation) {
+            return Err(PluginRuntimeError::CapabilityDenied);
+        }
+        let mut running = self
+            .running
+            .lock()
+            .map_err(|_| PluginRuntimeError::StateUnavailable)?;
+        let result = running
+            .get_mut(plugin_id)
+            .ok_or(PluginRuntimeError::RuntimeNotRunning)?
+            .request(capability, operation, payload);
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error,
+                PluginRuntimeError::CapabilityDenied | PluginRuntimeError::PluginRejected
+            )
+        }) {
+            let runtime = running.remove(plugin_id);
+            drop(running);
+            if let Some(runtime) = runtime {
+                let _ = runtime.stop();
+            }
+        }
+        result
+    }
+
+    pub fn drain_events(&self, plugin_id: &str) -> Result<Vec<PluginEvent>, PluginRuntimeError> {
+        let mut running = self
+            .running
+            .lock()
+            .map_err(|_| PluginRuntimeError::StateUnavailable)?;
+        let result = running
+            .get_mut(plugin_id)
+            .ok_or(PluginRuntimeError::RuntimeNotRunning)?
+            .drain_events();
+        if result.is_err() {
+            let runtime = running.remove(plugin_id);
+            drop(running);
+            if let Some(runtime) = runtime {
+                let _ = runtime.stop();
+            }
+        }
+        result
     }
 
     pub fn stop(&self, plugin_id: &str) -> Result<(), PluginRuntimeError> {
@@ -290,6 +571,27 @@ impl Drop for PluginRuntimeService {
 }
 
 #[cfg(target_os = "linux")]
+fn spawn_protocol_reader(
+    stdout: ChildStdout,
+) -> (
+    Receiver<Result<PluginHostFrame, PluginProtocolError>>,
+    JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let reader = std::thread::spawn(move || {
+        let mut stdout = BufReader::new(stdout);
+        loop {
+            let frame = read_plugin_frame(&mut stdout);
+            let terminal = frame.is_err();
+            if sender.send(frame).is_err() || terminal {
+                break;
+            }
+        }
+    });
+    (receiver, reader)
+}
+
+#[cfg(target_os = "linux")]
 fn revalidate_spec(
     storage_root: &Path,
     spec: &ExternalRuntimeSpec,
@@ -313,6 +615,13 @@ fn revalidate_spec(
         return Err(PluginRuntimeError::InvalidPackage);
     };
     if entrypoint != &spec.entrypoint
+        || package
+            .manifest
+            .capabilities
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != spec.capabilities
         || !permissions_exactly_match(
             &package.manifest.permissions,
             spec.permissions.iter().copied(),
@@ -624,6 +933,7 @@ mod tests {
             version: Version::new(1, 2, 3),
             package_path: PathBuf::from("/packages/runtime"),
             entrypoint: "bin/runtime".into(),
+            capabilities: [PluginCapability::Tasks].into_iter().collect(),
             permissions: self::permissions(permissions),
         }
     }
@@ -733,6 +1043,139 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn handshake_requires_the_exact_manifest_capabilities() {
+        let expected = [PluginCapability::Tasks].into_iter().collect();
+        assert_eq!(
+            validate_handshake(
+                PluginHostFrame::Ready {
+                    protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION,
+                    capabilities: vec![PluginCapability::Tasks],
+                },
+                &expected,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_handshake(
+                PluginHostFrame::Ready {
+                    protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION + 1,
+                    capabilities: vec![PluginCapability::Tasks],
+                },
+                &expected,
+            ),
+            Err(PluginRuntimeError::ProtocolViolation)
+        );
+        assert_eq!(
+            validate_handshake(
+                PluginHostFrame::Ready {
+                    protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION,
+                    capabilities: vec![PluginCapability::Diagnostics],
+                },
+                &expected,
+            ),
+            Err(PluginRuntimeError::ProtocolViolation)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_transport_correlates_responses_and_queues_typed_events() {
+        let test = TestDirectory::new("protocol");
+        let session = test.0.join("session");
+        fs::create_dir(&session).unwrap();
+        let script = r#"
+IFS= read -r initialize || exit 10
+printf '%s\n' '{"type":"ready","protocol_version":1,"capabilities":["tasks"]}'
+IFS= read -r request || exit 11
+request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+[ -n "$request_id" ] || exit 12
+printf '%s\n' '{"type":"event","capability":"tasks","event":"task.output","payload":{"chunk":"running"}}'
+printf '{"type":"response","request_id":"%s","capability":"tasks","result":{"accepted":true}}\n' "$request_id"
+IFS= read -r shutdown || exit 13
+case "$shutdown" in
+  *'"type":"shutdown"'*) exit 0 ;;
+  *) exit 14 ;;
+esac
+"#;
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (frames, reader) = spawn_protocol_reader(stdout);
+        let capabilities = [PluginCapability::Tasks].into_iter().collect();
+        let runtime_spec = ExternalRuntimeSpec {
+            id: "io.github.example.protocol".into(),
+            version: Version::new(1, 0, 0),
+            package_path: test.0.join("package"),
+            entrypoint: "entrypoint".into(),
+            capabilities,
+            permissions: permissions(&[PluginPermission::ProcessSpawn]),
+        };
+        let mut runtime = RunningPlugin {
+            child,
+            stdin: Some(stdin),
+            frames: Some(frames),
+            reader: Some(reader),
+            spec: runtime_spec,
+            events: VecDeque::new(),
+            session_path: session.clone(),
+        };
+        write_host_frame(
+            runtime.stdin.as_mut().unwrap(),
+            &HostPluginFrame::Initialize {
+                protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION,
+                plugin_id: "io.github.example.protocol".into(),
+                plugin_version: "1.0.0".into(),
+                capabilities: vec![PluginCapability::Tasks],
+                permissions: vec![PluginPermission::ProcessSpawn],
+            },
+        )
+        .unwrap();
+        let ready = runtime
+            .frames
+            .as_ref()
+            .unwrap()
+            .recv_timeout(HANDSHAKE_TIMEOUT)
+            .unwrap()
+            .unwrap();
+        validate_handshake(ready, &runtime.spec.capabilities).unwrap();
+
+        let response = runtime
+            .request(
+                PluginCapability::Tasks,
+                "tasks.list".into(),
+                serde_json::json!({}),
+            )
+            .unwrap();
+        assert_eq!(response.capability, PluginCapability::Tasks);
+        assert_eq!(response.result, serde_json::json!({ "accepted": true }));
+        assert_eq!(
+            runtime.drain_events().unwrap(),
+            [PluginEvent {
+                capability: PluginCapability::Tasks,
+                event: "task.output".into(),
+                payload: serde_json::json!({ "chunk": "running" }),
+            }]
+        );
+        assert_eq!(
+            runtime.request(
+                PluginCapability::Diagnostics,
+                "diagnostics.read".into(),
+                serde_json::json!({}),
+            ),
+            Err(PluginRuntimeError::CapabilityDenied)
+        );
+        runtime.stop().unwrap();
+        assert!(!session.exists());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn symlinked_entrypoints_and_runtime_roots_fail_closed() {
@@ -750,6 +1193,7 @@ mod tests {
             version: Version::new(1, 0, 0),
             package_path: package.clone(),
             entrypoint: "entrypoint".into(),
+            capabilities: [PluginCapability::Tasks].into_iter().collect(),
             permissions: permissions(&[PluginPermission::ProcessSpawn]),
         };
         assert_eq!(
@@ -800,7 +1244,7 @@ mod tests {
         fs::write(
             package.join("entrypoint"),
             format!(
-                "#!/bin/sh\nif [ -e '{}' ] || [ -e /workspace/host-only ]; then exit 42; fi\nwhile :; do sleep 1; done\n",
+                "#!/bin/sh\nif [ -e '{}' ] || [ -e /workspace/host-only ]; then exit 42; fi\nIFS= read -r initialize || exit 43\nprintf '%s\\n' '{{\"type\":\"ready\",\"protocol_version\":1,\"capabilities\":[\"tasks\"]}}'\nIFS= read -r shutdown || exit 44\ncase \"$shutdown\" in *'\"type\":\"shutdown\"'*) exit 0 ;; *) exit 45 ;; esac\n",
                 host_only.display()
             ),
         )
@@ -812,6 +1256,7 @@ mod tests {
             version: Version::new(1, 0, 0),
             package_path: package,
             entrypoint: "entrypoint".into(),
+            capabilities: [PluginCapability::Tasks].into_iter().collect(),
             permissions: permissions(&granted),
         };
         let (policy, workspace) = RuntimePolicy::authorize(&launch.permissions, None).unwrap();
@@ -822,14 +1267,44 @@ mod tests {
         let mut command = Command::new(BWRAP_PATH);
         command
             .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
         apply_resource_limits(&mut command);
         let mut child = command.spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(child.try_wait().unwrap().is_none());
-        child.kill().unwrap();
-        child.wait().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (frames, reader) = spawn_protocol_reader(stdout);
+        let capabilities = launch.capabilities.clone();
+        let mut runtime = RunningPlugin {
+            child,
+            stdin: Some(stdin),
+            frames: Some(frames),
+            reader: Some(reader),
+            spec: launch.clone(),
+            events: VecDeque::new(),
+            session_path: session.clone(),
+        };
+        write_host_frame(
+            runtime.stdin.as_mut().unwrap(),
+            &HostPluginFrame::Initialize {
+                protocol_version: EXTERNAL_PLUGIN_PROTOCOL_VERSION,
+                plugin_id: launch.id,
+                plugin_version: launch.version.to_string(),
+                capabilities: capabilities.iter().copied().collect(),
+                permissions: launch.permissions.iter().copied().collect(),
+            },
+        )
+        .unwrap();
+        let ready = runtime
+            .frames
+            .as_ref()
+            .unwrap()
+            .recv_timeout(HANDSHAKE_TIMEOUT)
+            .unwrap()
+            .unwrap();
+        validate_handshake(ready, &capabilities).unwrap();
+        runtime.stop().unwrap();
+        assert!(!session.exists());
     }
 }

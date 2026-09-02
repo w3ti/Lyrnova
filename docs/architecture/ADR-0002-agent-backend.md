@@ -32,9 +32,10 @@ Adotar uma arquitetura de plugin isolado:
 
 O código experimental existente permanece temporariamente no workspace durante
 a extração da plataforma de plugins. O registro nativo bloqueia todas as suas
-operações quando `io.github.w3ti.lyrnova.ai.codex` não está instalado e ativo;
-o frontend não registra listeners nem consulta conta nesse estado. A entrega
-final moverá adapter, processo e metadados para o pacote do plugin.
+operações quando não há um provider compatível instalado e ativo; a seleção usa
+tipo, capabilities e grants, sem um ID fixo. O frontend não registra listeners
+nem consulta conta nesse estado. A entrega final moverá adapter, processo e
+metadados para o pacote do plugin.
 
 A integração inicial usa um processo local e transporte `stdio` JSONL. O modo
 WebSocket não faz parte do MVP. O executável compatível será descoberto em

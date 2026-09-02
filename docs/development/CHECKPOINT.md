@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `d081f3c`
-Estado: lifecycle sandboxed e catálogo autenticado de plugins implementados e validados.
+Commit-base: `f382c44`
+Estado: sandbox, catálogo autenticado, protocolo externo e providers opcionais implementados.
 
 ## Direção consolidada
 
@@ -65,7 +65,7 @@ Estado: lifecycle sandboxed e catálogo autenticado de plugins implementados e v
 - Instalação e remoção usam o mesmo lock global, e resíduos de uma interrupção são
   limpos antes da descoberta na próxima inicialização.
 - A interface oferece remoção somente para plugins externos e exige confirmação.
-- Catálogo v1 estrito e embarcado adicionado como raiz de confiança para downloads;
+- Catálogo v2 estrito e embarcado adicionado como base compilada para downloads;
   ele começa vazio até uma release real ser revisada.
 - O frontend solicita download apenas por ID. URL de GitHub Release, tag, descritor,
   hash e destino permanecem sob controle do núcleo Rust.
@@ -81,6 +81,17 @@ Estado: lifecycle sandboxed e catálogo autenticado de plugins implementados e v
   durante a sessão, com limites de recursos e cleanup de lifecycle.
 - Ativação inicia o runtime; desativação, remoção, troca de workspace e encerramento
   terminam o processo. Falha no reinício desabilita o plugin externo.
+- Runtimes externos usam apenas JSONL v1 em stdin/stdout e precisam concluir um
+  handshake com versão e capabilities exatamente iguais ao manifesto.
+- Requests recebem IDs do host e operações namespaced pela capability; respostas,
+  erros e eventos repetem a fronteira tipada. Frames, payloads, filas e tempo são
+  limitados, e qualquer violação encerra a sessão.
+- Providers de IA ativos são resolvidos por tipo, capabilities e grants, sem ID
+  fixo no núcleo ou no frontend. Nenhum provider é um estado normal; múltiplos
+  providers ativos falham fechados até existir uma escolha persistida.
+- Commands de conta, chat, ferramentas e approvals repetem a autorização antes do
+  adapter. Runtimes de IA sem adapter tipado são recusados, sem encaminhar payload
+  genérico ao frontend.
 - Licença do código autoral migrada de MIT para `GPL-3.0-only`.
 - Texto integral oficial da GNU GPL versão 3 instalado em `LICENSE`.
 - Metadados Cargo, npm, AppStream e RPM atualizados, sem alterar as licenças das
@@ -103,7 +114,7 @@ Estado: lifecycle sandboxed e catálogo autenticado de plugins implementados e v
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace --offline` (94 testes aprovados e 1 teste de integração
+- `cargo test --workspace` (109 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -133,14 +144,12 @@ dependências e não devem ser substituídas.
 ## Ao retomar
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
-2. conectar o transporte estruturado do protocolo externo por capability;
-3. manter providers de IA opcionais e ausentes da instalação inicial;
-4. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-5. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
+2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
+3. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
    permissões, empacotamento, sidecar SHA-256, testes e publicação.
 
 ## Estado do repositório
 
-O commit `d081f3c` contém os fluxos de instalação, remoção e download. Este
-checkpoint acrescenta o broker sandboxed, o catálogo autenticado e os ADRs 0011
-e 0012; nenhum pacote OBS ou release foi realizado.
+O commit `f382c44` contém o broker sandboxed, o catálogo autenticado e os ADRs
+0011 e 0012. Este checkpoint acrescenta o protocolo externo, a resolução opcional
+de providers e os ADRs 0013 e 0014; nenhum pacote OBS ou release foi realizado.

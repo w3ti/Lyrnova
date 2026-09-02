@@ -13,7 +13,7 @@ use tauri::Manager;
 use crate::plugin_catalog::{PluginCatalogService, cleanup_downloads};
 use crate::plugin_manifest::{
     ManifestOrigin, PluginCapability, PluginCompatibility, PluginKind, PluginManifest,
-    PluginPermission, parse_manifest, permissions_exactly_match,
+    PluginPermission, PluginRuntime, parse_manifest, permissions_exactly_match,
 };
 use crate::plugin_package::{
     DiscoveredPluginPackage, InstalledPluginPackage, QuarantinedPluginPackages,
@@ -21,7 +21,8 @@ use crate::plugin_package::{
 };
 use crate::plugin_runtime::ExternalRuntimeSpec;
 
-pub const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
+#[cfg(test)]
+const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
 const PLUGIN_STATE_VERSION: u32 = 4;
 const MAX_PLUGIN_STATE_BYTES: u64 = 64 * 1024;
 const BUNDLED_MANIFESTS: &[&str] = &[
@@ -68,6 +69,28 @@ pub struct PluginSummary {
     pub requires_permission_review: bool,
     pub publisher_verified: bool,
     pub publisher_key_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AiProviderRuntime {
+    Builtin { module: String },
+    Process,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveAiProvider {
+    pub id: String,
+    pub name: String,
+    pub capabilities: Vec<PluginCapability>,
+    pub runtime: AiProviderRuntime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderSummary {
+    pub id: String,
+    pub name: String,
+    pub capabilities: Vec<PluginCapability>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,6 +192,9 @@ pub enum PluginError {
     RuntimeWorkspaceUnavailable,
     RuntimeStartFailed,
     RuntimeStopFailed,
+    NoAiProvider,
+    MultipleAiProviders,
+    CapabilityUnavailable,
     StateUnavailable,
     Io,
 }
@@ -275,6 +301,64 @@ impl PluginRegistry {
             .read()
             .map_err(|_| PluginError::StateUnavailable)?;
         Ok(summaries(&state))
+    }
+
+    pub fn active_ai_provider(
+        &self,
+        required_capabilities: &[PluginCapability],
+        required_permissions: &[PluginPermission],
+    ) -> Result<ActiveAiProvider, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        let mut enabled = state.catalog.iter().filter(|plugin| {
+            let manifest = &plugin.manifest;
+            manifest.kind == PluginKind::AiProvider
+                && state.preferences.installed.get(&manifest.id) == Some(&manifest.version)
+                && state.preferences.enabled.contains(&manifest.id)
+                && permissions_exactly_match(
+                    &manifest.permissions,
+                    state
+                        .preferences
+                        .grants
+                        .get(&manifest.id)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                )
+        });
+        let Some(provider) = enabled.next() else {
+            return Err(PluginError::NoAiProvider);
+        };
+        if enabled.next().is_some() {
+            return Err(PluginError::MultipleAiProviders);
+        }
+        if !required_capabilities
+            .iter()
+            .all(|capability| provider.manifest.capabilities.contains(capability))
+        {
+            return Err(PluginError::CapabilityUnavailable);
+        }
+        let grants = state.preferences.grants.get(&provider.manifest.id);
+        if !required_permissions.iter().all(|permission| {
+            provider.manifest.permissions.contains(permission)
+                && grants.is_some_and(|grants| grants.contains(permission))
+        }) {
+            return Err(PluginError::PermissionDenied);
+        }
+        let runtime = match &provider.manifest.runtime {
+            PluginRuntime::Builtin { module } => AiProviderRuntime::Builtin {
+                module: module.clone(),
+            },
+            PluginRuntime::Process { .. } => AiProviderRuntime::Process,
+        };
+        Ok(ActiveAiProvider {
+            id: provider.manifest.id.clone(),
+            name: provider.manifest.name.clone(),
+            capabilities: provider.manifest.capabilities.clone(),
+            runtime,
+        })
     }
 
     pub fn is_enabled(&self, id: &str) -> bool {
@@ -668,6 +752,7 @@ fn external_runtime_spec(
         version: plugin.manifest.version.clone(),
         package_path: package_path.clone(),
         entrypoint: entrypoint.clone(),
+        capabilities: plugin.manifest.capabilities.iter().copied().collect(),
         permissions: granted,
     }))
 }
@@ -960,6 +1045,97 @@ mod tests {
         assert!(!preferences.installed.contains_key(CODEX_PLUGIN_ID));
         assert!(!preferences.enabled.contains(CODEX_PLUGIN_ID));
         assert!(!preferences.grants.contains_key(CODEX_PLUGIN_ID));
+    }
+
+    #[test]
+    fn ai_provider_resolution_uses_kind_capabilities_and_grants_instead_of_a_fixed_id() {
+        let mut provider = bundled_entries()
+            .into_iter()
+            .find(|plugin| plugin.manifest.kind == PluginKind::AiProvider)
+            .unwrap();
+        provider.manifest.id = "io.github.example.lyrnova.ai.provider".into();
+        provider.manifest.name = "Example AI".into();
+        let mut preferences = PluginPreferences::fail_closed();
+        preferences.installed.insert(
+            provider.manifest.id.clone(),
+            provider.manifest.version.clone(),
+        );
+        preferences.enabled.insert(provider.manifest.id.clone());
+        preferences.grants.insert(
+            provider.manifest.id.clone(),
+            provider.manifest.permissions.iter().copied().collect(),
+        );
+        let registry = PluginRegistry {
+            state: RwLock::new(PluginRegistryState {
+                catalog: vec![provider],
+                preferences,
+            }),
+            catalog_service: PluginCatalogService::default(),
+        };
+
+        let active = registry
+            .active_ai_provider(
+                &[PluginCapability::AccountAuth, PluginCapability::AiChat],
+                &[
+                    PluginPermission::ProcessSpawn,
+                    PluginPermission::NetworkAccess,
+                ],
+            )
+            .unwrap();
+        assert_eq!(active.id, "io.github.example.lyrnova.ai.provider");
+        assert_eq!(active.name, "Example AI");
+        assert_eq!(
+            registry.active_ai_provider(&[PluginCapability::Diagnostics], &[]),
+            Err(PluginError::CapabilityUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_default_registry_exposes_no_active_ai_provider() {
+        let registry = PluginRegistry::default();
+        assert_eq!(
+            registry.active_ai_provider(&[PluginCapability::AiChat], &[]),
+            Err(PluginError::NoAiProvider)
+        );
+    }
+
+    #[test]
+    fn multiple_active_ai_providers_fail_closed() {
+        let first = bundled_entries()
+            .into_iter()
+            .find(|plugin| plugin.manifest.kind == PluginKind::AiProvider)
+            .unwrap();
+        let mut second = first.clone();
+        second.manifest.id = "io.github.example.lyrnova.ai.second".into();
+        second.manifest.name = "Second AI".into();
+        let mut preferences = PluginPreferences::fail_closed();
+        for provider in [&first, &second] {
+            preferences.installed.insert(
+                provider.manifest.id.clone(),
+                provider.manifest.version.clone(),
+            );
+            preferences.enabled.insert(provider.manifest.id.clone());
+            preferences.grants.insert(
+                provider.manifest.id.clone(),
+                provider.manifest.permissions.iter().copied().collect(),
+            );
+        }
+        let registry = PluginRegistry {
+            state: RwLock::new(PluginRegistryState {
+                catalog: vec![first, second],
+                preferences,
+            }),
+            catalog_service: PluginCatalogService::default(),
+        };
+
+        assert_eq!(
+            registry.active_ai_provider(&[PluginCapability::AiChat], &[]),
+            Err(PluginError::MultipleAiProviders)
+        );
+        assert_eq!(
+            registry.active_ai_provider(&[], &[]),
+            Err(PluginError::MultipleAiProviders)
+        );
     }
 
     #[test]

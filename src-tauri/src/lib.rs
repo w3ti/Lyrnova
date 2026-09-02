@@ -1,9 +1,11 @@
+pub mod ai_provider;
 pub mod app_server;
 pub mod backend;
 pub mod git;
 pub mod plugin_catalog;
 pub mod plugin_manifest;
 pub mod plugin_package;
+pub mod plugin_protocol;
 pub mod plugin_runtime;
 pub mod plugin_trust;
 pub mod plugins;
@@ -17,18 +19,19 @@ use std::sync::{
 };
 use std::{fs, process::Command};
 
+use ai_provider::{current_ai_provider, resolve_ai_provider};
 use git::{GitError, GitService, GitStatusSummary};
 use plugin_catalog::{
     PluginCatalogError, PluginCatalogService, TrustedPluginSummary, download_release,
 };
-use plugin_manifest::PluginPermission;
 use plugin_manifest::permissions_exactly_match;
+use plugin_manifest::{PluginCapability, PluginPermission};
 use plugin_package::{
     PluginPackageDescriptor, PluginPackageError, PluginPackageInstaller, PluginPackageReview,
     StagedPluginPackage,
 };
 use plugin_runtime::{PluginRuntimeError, PluginRuntimeService};
-use plugins::{CODEX_PLUGIN_ID, PluginError, PluginRegistry, PluginSummary, plugin_storage_root};
+use plugins::{AiProviderSummary, PluginError, PluginRegistry, PluginSummary, plugin_storage_root};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -408,6 +411,13 @@ fn plugin_list(
 }
 
 #[tauri::command]
+fn ai_provider_current(
+    registry: tauri::State<'_, PluginRegistry>,
+) -> Result<Option<AiProviderSummary>, AgentRuntimeError> {
+    current_ai_provider(registry.inner())
+}
+
+#[tauri::command]
 fn plugin_install(
     plugin_id: String,
     approved_permissions: Vec<PluginPermission>,
@@ -486,6 +496,12 @@ fn map_runtime_error(error: PluginRuntimeError) -> PluginError {
         PluginRuntimeError::StopFailed => PluginError::RuntimeStopFailed,
         PluginRuntimeError::RuntimeDirectoryUnavailable
         | PluginRuntimeError::SpawnFailed
+        | PluginRuntimeError::ProtocolViolation
+        | PluginRuntimeError::TransportClosed
+        | PluginRuntimeError::RequestTimeout
+        | PluginRuntimeError::RuntimeNotRunning
+        | PluginRuntimeError::CapabilityDenied
+        | PluginRuntimeError::PluginRejected
         | PluginRuntimeError::StateUnavailable => PluginError::RuntimeStartFailed,
     }
 }
@@ -797,8 +813,9 @@ async fn agent_account_read(
     state: tauri::State<'_, ProjectState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentConnectionStatus, AgentRuntimeError> {
-    require_codex_permissions(
-        &plugins,
+    resolve_ai_provider(
+        plugins.inner(),
+        &[PluginCapability::AccountAuth],
         &[
             PluginPermission::ProcessSpawn,
             PluginPermission::NetworkAccess,
@@ -815,8 +832,9 @@ async fn agent_logout(
     state: tauri::State<'_, ProjectState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentConnectionStatus, AgentRuntimeError> {
-    require_codex_permissions(
-        &plugins,
+    resolve_ai_provider(
+        plugins.inner(),
+        &[PluginCapability::AccountAuth],
         &[
             PluginPermission::ProcessSpawn,
             PluginPermission::NetworkAccess,
@@ -836,8 +854,13 @@ async fn agent_turn_start(
     approvals: tauri::State<'_, ApprovalBroker>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentTurnResult, AgentRuntimeError> {
-    require_codex_permissions(
-        &plugins,
+    resolve_ai_provider(
+        plugins.inner(),
+        &[
+            PluginCapability::AiChat,
+            PluginCapability::AiTools,
+            PluginCapability::Approvals,
+        ],
         &[
             PluginPermission::WorkspaceRead,
             PluginPermission::ProcessSpawn,
@@ -866,7 +889,11 @@ fn agent_approval_resolve(
     approvals: tauri::State<'_, ApprovalBroker>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<(), AgentRuntimeError> {
-    require_codex_permissions(&plugins, &[PluginPermission::RequestApproval])?;
+    resolve_ai_provider(
+        plugins.inner(),
+        &[PluginCapability::Approvals],
+        &[PluginPermission::RequestApproval],
+    )?;
     approvals.resolve(request)
 }
 
@@ -878,8 +905,9 @@ fn agent_login_start(
     login: tauri::State<'_, LoginState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<(), AgentRuntimeError> {
-    require_codex_permissions(
-        &plugins,
+    resolve_ai_provider(
+        plugins.inner(),
+        &[PluginCapability::AccountAuth],
         &[
             PluginPermission::ProcessSpawn,
             PluginPermission::NetworkAccess,
@@ -916,20 +944,6 @@ fn agent_runtime_root(state: &tauri::State<'_, ProjectState>) -> std::path::Path
     project_snapshot(state)
         .map(|project| project.workspace.root().to_owned())
         .unwrap_or_else(std::env::temp_dir)
-}
-
-fn require_codex_permissions(
-    plugins: &tauri::State<'_, PluginRegistry>,
-    permissions: &[PluginPermission],
-) -> Result<(), AgentRuntimeError> {
-    if !plugins.is_enabled(CODEX_PLUGIN_ID) {
-        return Err(AgentRuntimeError::PluginDisabled);
-    }
-    permissions.iter().try_for_each(|permission| {
-        plugins
-            .authorize(CODEX_PLUGIN_ID, *permission)
-            .map_err(|_| AgentRuntimeError::PluginPermissionDenied)
-    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -985,6 +999,7 @@ pub fn run() {
             git_unstage,
             git_commit,
             plugin_list,
+            ai_provider_current,
             plugin_install,
             plugin_uninstall,
             plugin_set_enabled,

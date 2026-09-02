@@ -65,6 +65,11 @@ Capabilities descrevem superfícies funcionais. Permissões representam
 autoridade sensível e são enums fechados. A presença de uma capability não
 concede a permissão correspondente.
 
+Runtimes externos anunciam no handshake exatamente as capabilities do manifesto.
+Requests, responses e eventos trafegam em JSONL e continuam vinculados a uma
+capability tipada; a operação também precisa usar seu namespace. O contrato de
+frames e limites está em [`protocol.md`](protocol.md).
+
 Na instalação, o conjunto aprovado precisa corresponder exatamente às
 permissões do manifesto. As concessões são persistidas separadamente. Se uma
 atualização mudar as permissões pedidas, o plugin é desativado até nova revisão.
@@ -77,6 +82,13 @@ Rust e Web Essentials continuam embutidos e habilitados inicialmente com
 `workspace_read`. O Codex permanece ausente da instalação inicial. Seu
 manifesto declara processo, rede, leitura do workspace e solicitação de
 approval, e cada entrada do adapter verifica as permissões necessárias.
+
+O host resolve um provider ativo por `kind: ai_provider`, capabilities e grants,
+sem conhecer seu ID. Nenhum provider é um estado normal. Múltiplos providers
+ativos falham fechados até existir uma preferência explícita. O adapter builtin
+atual atende somente o módulo `ai.codex`; runtimes externos de IA precisam de um
+adapter tipado antes que chat, conta, ferramentas ou approvals sejam expostos à
+interface.
 
 Pacotes externos locais usam `.tar.zst` e passam por staging privado. O núcleo
 limita o pacote comprimido, o fluxo descomprimido, cada arquivo, o total
@@ -118,6 +130,12 @@ A rede nasce isolada e só é compartilhada com `network_access`. Ambiente, HOME
 secrets e paths externos não atravessam a fronteira. Se o sandbox estiver ausente,
 o plugin permanece desabilitado. Outras plataformas falham fechadas até terem um
 backend equivalente.
+
+Depois do lançamento, o host exige o handshake do protocolo v1 em até três
+segundos. Stdin/stdout não formam um terminal: aceitam apenas frames JSONL de até
+256 KiB. Chamadas recebem IDs do host e são autorizadas pela capability declarada;
+respostas fora de ordem, eventos não declarados, timeout e mensagens inválidas
+encerram o runtime e removem sua sessão.
 
 Na reinicialização, o catálogo externo é reconstruído apenas de instalações com
 recibo válido. O núcleo recalcula o SHA-256 da árvore, incluindo paths, tipos,

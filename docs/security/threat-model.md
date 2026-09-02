@@ -46,6 +46,8 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | ANSI/Markdown injeta UI | sanitização e CSP |
 | Prompt injection em arquivo | conteúdo não amplia authority |
 | Plugin/backend comprometido | protocolo limitado e policy engine independente |
+| Provider assume identidade privilegiada | seleção por tipo/capabilities/grants; nenhum ID concede autoridade |
+| Providers ativos concorrem pela UI | resolução ambígua falha fechada |
 | Frontend injeta path de pacote | seleção nativa e path mantido somente no núcleo Rust |
 | Confirmação troca permissões revisadas | token efêmero e igualdade exata no command Rust |
 | Remoção promove versão antiga | quarentena atômica do diretório completo do ID |
@@ -81,10 +83,12 @@ são telemetria.
 O editor já lê e salva arquivos UTF-8 existentes por uma fronteira Rust
 limitada à raiz do projeto, com revisão de conflito. Ele ainda não cria nem
 exclui arquivos e recusa symlinks. O IDE inicia sem provider de IA e não
-consulta conta nem registra eventos de agente sem o plugin Codex ativo. A base
-experimental do plugin exige HTTPS e hosts OpenAI permitidos para login;
-tokens não cruzam a fronteira Rust. Processos, rede e filesystem solicitados
-por qualquer plugin permanecem sujeitos às permissões e approvals do núcleo.
+consulta conta nem registra eventos de agente sem um provider ativo. O registro
+resolve essa opção por tipo, capabilities e grants, sem identidade fixa; zero é
+um estado normal e ambiguidade falha fechada. O adapter experimental Codex exige
+HTTPS e hosts OpenAI permitidos para login; tokens não cruzam a fronteira Rust.
+Processos, rede e filesystem solicitados por qualquer plugin permanecem sujeitos
+às permissões e approvals do núcleo.
 
 Manifests de plugin usam schema e enums fechados. Origem, compatibilidade e
 entrypoint são validados antes do catálogo; concessões ficam separadas da
@@ -141,5 +145,17 @@ no modo concedido. Rede, ambiente e HOME são negados por padrão; secret storag
 approvals continuam mediados pelo host. O entrypoint executável existe somente em
 uma sessão privada, com `no_new_privs` e limites de recursos. Falha de sandbox mantém
 o plugin desabilitado, e desativação, remoção, troca de workspace ou encerramento
-terminam o processo. O transporte funcional do protocolo ainda será conectado por
-capability, sem IPC genérico de shell.
+terminam o processo.
+
+O transporte funcional usa stdin/stdout somente como JSONL v1. O handshake exige
+versão e conjunto exato de capabilities do manifesto. Frames, profundidade,
+strings, coleções, eventos e tempo são limitados; request IDs são gerados pelo host
+e respostas precisam repetir ID e capability. Operações pertencem ao namespace da
+capability declarada. Mensagem fora de ordem ou inválida encerra o runtime. Payloads
+não são encaminhados ao frontend nem interpretados como comandos ou autoridade.
+
+Commands de conta, chat, ferramentas e approvals repetem a resolução do provider
+e a verificação das capabilities e permissões necessárias antes de alcançar o
+adapter. O frontend recebe somente um resumo tipado do provider ativo e não
+seleciona autoridade pelo catálogo. Runtimes de IA sem adapter tipado são
+recusados, mesmo que seu handshake externo seja válido.

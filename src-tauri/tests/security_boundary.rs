@@ -116,11 +116,15 @@ fn local_workspace_uses_only_external_bundled_javascript() {
 fn initial_shell_is_an_ide_without_ai_controls() {
     let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
         .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
 
     assert!(html.contains("data-ai-plugin-enabled=\"false\""));
     assert!(html.contains("data-activity=\"agent\"") && html.contains("ai-plugin-control"));
     assert!(html.contains("data-action=\"open-account\"") && html.contains("hidden>◎"));
     assert!(html.contains("data-action=\"show-agent-panel\" hidden"));
+    assert!(javascript.contains("invoke(\"ai_provider_current\")"));
+    assert!(!javascript.contains("io.github.w3ti.lyrnova.ai.codex"));
 }
 
 #[test]

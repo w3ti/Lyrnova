@@ -31,9 +31,9 @@ O entrypoint instalado continua sem bit de execução. A cada sessão, o núcleo
 uma cópia privada e executável e a sobrepõe no mesmo path dentro do mount
 read-only. O processo recebe apenas identificadores públicos do protocolo, limites
 de arquivos abertos, tamanho de arquivo e memória virtual, além de `no_new_privs`.
-Entrada, saída e erro ficam desconectados até que o transporte do protocolo v1
-seja ligado a superfícies específicas do host; habilitar não cria um command de
-shell ou canal genérico no frontend.
+Stdin e stdout ficam ligados somente ao transporte JSONL v1 delimitado por
+capability descrito no ADR-0013; stderr permanece desconectado. Habilitar não
+cria um command de shell ou canal genérico no frontend.
 
 Ativar inicia o processo antes de persistir a habilitação e reverte o processo se
 a persistência falhar. Desativar, remover, trocar de workspace ou encerrar o app
@@ -47,5 +47,5 @@ plugins externos ainda habilitados são reiniciados; falha no sandbox os desabil
 - o plugin não recebe HOME, secrets, ambiente do IDE ou filesystem do usuário
   fora do workspace concedido;
 - Bubblewrap passa a ser dependência de runtime do pacote Linux;
-- o transporte funcional do protocolo deverá usar pipes estruturados e limites,
-  sem ampliar os mounts ou expor execução genérica.
+- o transporte funcional usa pipes estruturados e limitados, sem ampliar mounts
+  ou expor execução genérica.

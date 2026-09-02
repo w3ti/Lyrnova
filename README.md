@@ -45,6 +45,15 @@ LSP/autocomplete, DAP/debug, templates, tasks, testes e toolchains. Plugins de
 IA poderão fornecer autenticação, modelos, chat, ferramentas e approvals sem
 entrar no núcleo do IDE.
 
+Runtimes externos negociam um protocolo JSONL versionado e só recebem chamadas
+namespaced pelas capabilities declaradas no manifesto. IDs são gerados pelo host,
+frames e payloads são limitados e nenhuma mensagem vira shell ou IPC genérico do
+frontend.
+
+Providers de IA ativos são resolvidos por tipo, capabilities, permissões e grants,
+sem um ID fixo no núcleo ou no frontend. Nenhum provider é um estado normal; se
+mais de um estiver ativo, o uso falha fechado até existir uma seleção explícita.
+
 Primeira coleção planejada:
 
 - linguagens e runtimes: Rust, Angular, React, Node.js e C/C++;
@@ -73,11 +82,11 @@ O projeto está na fase de fundação funcional. O workspace Tauri 2 já oferece
 criação e abertura nativa de projetos, Explorer, Monaco Editor, abas, syntax e
 autocomplete, operações Git locais, terminal e painéis redimensionáveis. A
 plataforma de plugins já cobre manifesto, instalação transacional, catálogo,
-remoção e lifecycle sandboxed; o protocolo funcional continua em implementação.
+remoção, lifecycle sandboxed e protocolo funcional limitado por capability.
 
-A integração experimental com Codex App Server está sendo movida para um
-plugin opcional. Ela não representa uma dependência nem o propósito central do
-produto e ficará ausente da instalação inicial.
+A integração experimental com Codex App Server é acessada pelo adapter do plugin
+opcional correspondente. Ela não representa uma dependência nem o propósito
+central do produto e permanece ausente da instalação inicial.
 
 ## Arquitetura
 
