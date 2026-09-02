@@ -1,0 +1,25 @@
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+/ui/dist/
+/ui/node_modules/
+
+# Local editor and OS state
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Packaging outputs
+/dist/
+/packaging/output/
+*.deb
+*.rpm
+*.src.rpm
+*.tar.zst
+
+# Local logs and environment
+*.log
+.env
+.env.*
+!.env.example

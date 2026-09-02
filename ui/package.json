@@ -1,0 +1,17 @@
+{
+  "name": "lyrnova-ui",
+  "private": true,
+  "version": "0.1.0",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check": "node --check app.js"
+  },
+  "dependencies": {
+    "monaco-editor": "0.53.0"
+  },
+  "devDependencies": {
+    "vite": "8.2.2"
+  }
+}

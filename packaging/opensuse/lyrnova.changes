@@ -1,0 +1,7 @@
+-------------------------------------------------------------------
+Tue Sep  1 19:00:00 UTC 2026 - Rodrigo Brito <rbrito@w3ti.com>
+
+- Initial 0.1.0 development package.
+- Add native project selection, Monaco editor, Explorer, local Git and terminal.
+- Establish Lyrnova as an extensible IDE with optional plugin capabilities.
+- Keep the experimental Codex integration disabled and absent from the initial experience.

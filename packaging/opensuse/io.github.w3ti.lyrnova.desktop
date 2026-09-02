@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lyrnova
+GenericName=Ambiente integrado de desenvolvimento
+Comment=Desenvolva projetos com editor, Git, terminal e plugins opcionais
+Exec=lyrnova
+Icon=io.github.w3ti.lyrnova
+Terminal=false
+Categories=Development;IDE;
+Keywords=IDE;Editor;Development;Programming;Git;Plugins;
+StartupNotify=true
+StartupWMClass=Lyrnova

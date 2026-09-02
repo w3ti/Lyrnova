@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.w3ti.lyrnova</id>
+  <name>Lyrnova</name>
+  <summary>IDE desktop extensível para desenvolvimento de software</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <description>
+    <p>
+      Lyrnova reúne projetos, editor Monaco, Explorer, Git e terminal local
+      numa interface desktop controlada pelo usuário.
+    </p>
+    <p>
+      Linguagens, ferramentas e provedores de IA são plugins opcionais com
+      capabilities e permissões mediadas pelo núcleo do IDE.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.w3ti.lyrnova.desktop</launchable>
+  <developer id="io.github.w3ti"><name>w3ti</name></developer>
+  <url type="homepage">https://github.com/w3ti/lyrnova</url>
+  <url type="bugtracker">https://github.com/w3ti/lyrnova/issues</url>
+  <provides>
+    <binary>lyrnova</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-01">
+      <description>
+        <p>Primeira fundação funcional para avaliação local.</p>
+      </description>
+    </release>
+  </releases>
+</component>

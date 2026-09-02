@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark light">
+    <title>Lyrnova</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell" data-sidebar-open="false" data-inspector-open="false" data-chat-open="false" data-activity-panel="explorer" data-workspace-view="editor" data-ai-plugin-enabled="false">
+      <nav class="activity-bar" aria-label="Áreas do workspace">
+        <span class="activity-brand" aria-label="Lyrnova">L</span>
+        <button class="activity-button active" type="button" data-activity="explorer" title="Explorer" aria-label="Explorer" aria-pressed="true">▱</button>
+        <button class="activity-button" type="button" data-action="command-palette" title="Buscar" aria-label="Buscar">⌕</button>
+        <button class="activity-button" type="button" data-activity="git" title="Controle de código-fonte" aria-label="Controle de código-fonte" aria-pressed="false">⑂<span class="activity-badge" id="git-activity-badge">0</span></button>
+        <button class="activity-button ai-plugin-control" type="button" data-activity="agent" title="Conversas de IA" aria-label="Conversas de IA" aria-pressed="false" hidden>◇</button>
+        <span class="activity-spacer"></span>
+        <button class="activity-button" type="button" data-activity="settings" title="Configurações" aria-label="Configurações" aria-pressed="false">⚙</button>
+        <button class="activity-button ai-plugin-control" type="button" data-action="open-account" title="Conta do plugin Codex" aria-label="Conta do plugin Codex" hidden>◎</button>
+      </nav>
+
+      <aside class="sidebar" id="project-sidebar" aria-label="Painel lateral">
+        <header class="sidebar-header">
+          <img class="brand" src="assets/lyrnova-logo.png" alt="Lyrnova" width="132">
+          <button class="icon-button compact-only" type="button" data-action="close-sidebar" aria-label="Fechar barra lateral">×</button>
+        </header>
+
+        <section class="sidebar-panel explorer-panel" aria-label="Explorer">
+          <div class="section-heading"><span>Projeto</span><span class="heading-actions"><button class="icon-button" type="button" data-action="create-project" aria-label="Criar projeto">＋</button><button class="icon-button" type="button" data-action="open-project" aria-label="Abrir projeto">▱</button></span></div>
+          <button class="project-card selected" type="button" data-action="open-project" aria-current="true" title="Abrir outro projeto">
+            <span class="project-mark" id="project-mark" aria-hidden="true">L</span>
+            <span class="project-copy"><strong id="project-name">Lyrnova</strong><small id="project-git-summary">Carregando Git…</small></span>
+            <span class="project-menu" aria-hidden="true">•••</span>
+          </button>
+          <div class="section-heading file-heading"><span>Explorer</span><button class="icon-button" type="button" aria-label="Mais ações de arquivo">•••</button></div>
+          <section class="sidebar-files" aria-label="Arquivos do projeto">
+            <label class="file-filter"><span aria-hidden="true">⌕</span><input id="file-filter" type="search" placeholder="Filtrar arquivos"></label>
+            <div class="file-tree" role="tree">
+              <button type="button" role="treeitem" aria-expanded="true"><span class="file-type-icon folder">▾</span><span>src-tauri</span></button>
+              <button class="nested" type="button" role="treeitem" data-file="src-tauri/src/backend.rs"><span class="file-type-icon rust">Rs</span><span>backend.rs</span></button>
+              <button class="nested" type="button" role="treeitem" data-file="src-tauri/src/protocol.rs"><span class="file-type-icon rust">Rs</span><span>protocol.rs</span></button>
+              <button type="button" role="treeitem" aria-expanded="true"><span class="file-type-icon folder">▾</span><span>ui</span></button>
+              <button class="nested" type="button" role="treeitem" data-file="ui/app.js"><span class="file-type-icon javascript">JS</span><span>app.js</span></button>
+              <button class="nested" type="button" role="treeitem" data-file="ui/index.html"><span class="file-type-icon html">&lt;&gt;</span><span>index.html</span></button>
+              <button class="nested" type="button" role="treeitem" data-file="ui/styles.css"><span class="file-type-icon css">#</span><span>styles.css</span></button>
+              <button type="button" role="treeitem" data-file="Cargo.toml"><span class="file-type-icon toml">T</span><span>Cargo.toml</span></button>
+              <button type="button" role="treeitem" data-file="README.md"><span class="file-type-icon markdown">M</span><span>README.md</span></button>
+            </div>
+          </section>
+        </section>
+
+        <section class="sidebar-panel git-panel" aria-label="Controle de código-fonte">
+          <div class="section-heading"><span>Controle de código-fonte</span><button class="icon-button" type="button" aria-label="Mais ações Git">•••</button></div>
+          <div class="git-branch"><span aria-hidden="true">⑂</span><span><strong id="git-branch-name">Git</strong><small id="git-branch-summary">Carregando status…</small></span><button type="button" data-action="refresh-git" title="Atualizar" aria-label="Atualizar status Git">↻</button></div>
+          <label class="commit-input"><textarea id="git-commit-message" rows="2" maxlength="16384" placeholder="Mensagem de commit" aria-label="Mensagem de commit"></textarea><button id="git-commit-button" type="button" data-action="git-commit" disabled>Commit</button></label>
+          <section id="git-staged-group" hidden>
+            <div class="section-heading git-group"><span>Alterações preparadas</span><span id="git-staged-count">0</span></div>
+            <div class="git-file-list" id="git-staged-list"></div>
+          </section>
+          <section id="git-changes-group">
+            <div class="section-heading git-group"><span>Alterações</span><span id="git-changes-count">0</span></div>
+            <div class="git-file-list" id="git-changes-list"><p class="git-empty">Lendo repositório…</p></div>
+          </section>
+          <p class="git-note" id="git-note">Stage, unstage e commit são locais. Push permanece desativado.</p>
+        </section>
+
+        <section class="sidebar-panel agent-panel ai-plugin-control" aria-label="Conversas de IA" hidden>
+          <div class="sidebar-actions">
+            <button class="primary-action" type="button" data-action="new-thread"><span aria-hidden="true">＋</span>Nova conversa<kbd>Ctrl N</kbd></button>
+            <button class="search-action" type="button" data-action="command-palette"><span aria-hidden="true">⌕</span>Buscar<kbd>Ctrl K</kbd></button>
+          </div>
+          <div class="section-heading conversation-heading"><span>Conversas</span><button class="icon-button" type="button" aria-label="Filtrar conversas">≡</button></div>
+          <nav class="thread-list" aria-label="Conversas do projeto">
+            <button class="thread-item active" type="button" aria-current="page"><span class="thread-state running" aria-hidden="true"></span><span><strong>Redesenhar workspace inicial</strong><small>Agora · em andamento</small></span></button>
+            <button class="thread-item" type="button"><span class="thread-state" aria-hidden="true"></span><span><strong>Definir protocolo de eventos</strong><small>18 min</small></span></button>
+            <button class="thread-item" type="button"><span class="thread-state" aria-hidden="true"></span><span><strong>Revisar políticas do sandbox</strong><small>Ontem</small></span></button>
+          </nav>
+        </section>
+
+        <section class="sidebar-panel settings-panel" aria-label="Configurações">
+          <div class="section-heading"><span>Configurações</span></div>
+          <nav class="settings-nav" aria-label="Categorias de configurações">
+            <button type="button" data-settings-target="settings-editor"><span>{ }</span><span><strong>Editor</strong><small>Fonte, minimap e comportamento</small></span></button>
+            <button type="button" data-settings-target="settings-terminal"><span>⌘</span><span><strong>Terminal</strong><small>Aparência do terminal integrado</small></span></button>
+            <button type="button" data-settings-target="settings-files"><span>▱</span><span><strong>Arquivos</strong><small>Proteção de alterações locais</small></span></button>
+            <button type="button" data-settings-target="settings-planned"><span>＋</span><span><strong>Planejadas</strong><small>Próximas opções do IDE</small></span></button>
+          </nav>
+          <p class="settings-sidebar-note">As preferências são locais e entram em vigor imediatamente.</p>
+        </section>
+
+        <footer class="sidebar-footer ai-plugin-control" hidden>
+          <button class="profile-button" type="button" data-action="open-account" aria-haspopup="dialog"><span class="avatar signed-out" id="profile-avatar" aria-hidden="true">↗</span><span><strong id="profile-account-name">Verificando conta…</strong><small id="profile-account-plan">Codex App Server</small></span><span aria-hidden="true">›</span></button>
+        </footer>
+      </aside>
+      <div class="panel-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="Redimensionar barra lateral" aria-orientation="vertical" tabindex="0"></div>
+
+      <section class="workbench" aria-label="Área de desenvolvimento">
+        <header class="context-bar">
+          <div class="context-left">
+            <button class="icon-button sidebar-toggle" type="button" data-action="open-sidebar" aria-label="Abrir projetos">☰</button>
+            <div class="project-context"><strong id="context-project-name">Lyrnova</strong><span id="context-project-path">/home/rbrito/Git/ChatGPT</span></div>
+            <span class="branch-pill"><span aria-hidden="true">⑂</span> <span id="context-branch">main</span></span>
+            <span class="environment-pill"><span class="status-dot"></span> Local</span>
+          </div>
+          <div class="context-actions">
+            <button class="toolbar-button ai-plugin-control" type="button" data-action="show-agent-panel" hidden><span aria-hidden="true">◇</span> Chat</button>
+            <button class="toolbar-button" type="button" data-action="focus-editor"><span aria-hidden="true">{ }</span> Editor</button>
+            <button class="toolbar-button" type="button" data-action="toggle-terminal" aria-pressed="true"><span aria-hidden="true">⌘</span> Terminal</button>
+            <button class="toolbar-button" type="button" data-action="toggle-inspector" aria-pressed="true"><span aria-hidden="true">◧</span> Alterações <b>12</b></button>
+            <button class="icon-button" type="button" aria-label="Mais opções">•••</button>
+            <div class="window-controls" aria-label="Controles da janela">
+              <button class="window-control" id="window-minimize" type="button" title="Minimizar" aria-label="Minimizar">−</button>
+              <button class="window-control" id="window-maximize" type="button" title="Maximizar" aria-label="Maximizar">□</button>
+              <button class="window-control close" id="window-close" type="button" title="Fechar" aria-label="Fechar">×</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="workspace-body">
+          <main class="settings-workspace" id="settings-workspace" aria-label="Configurações do Lyrnova" hidden>
+            <header class="settings-header">
+              <div><p class="eyebrow">Preferências locais</p><h1>Configurações</h1><p>Personalize o editor e o ambiente sem alterar os arquivos do projeto.</p></div>
+              <button class="secondary-button" type="button" data-action="reset-settings">Restaurar padrões</button>
+            </header>
+            <div class="settings-scroll">
+              <section class="settings-section" id="settings-editor" aria-labelledby="settings-editor-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">{ }</span><div><h2 id="settings-editor-title">Editor</h2><p>Tipografia, navegação e representação do código.</p></div></div>
+                <div class="setting-row">
+                  <div><strong>Tamanho da fonte</strong><small>Tamanho do código em pixels.</small></div>
+                  <div class="setting-stepper" aria-label="Tamanho da fonte do editor"><button type="button" data-setting-adjust="editorFontSize" data-delta="-1" aria-label="Diminuir fonte do editor">−</button><output id="editor-font-size-value">12 px</output><button type="button" data-setting-adjust="editorFontSize" data-delta="1" aria-label="Aumentar fonte do editor">＋</button></div>
+                </div>
+                <label class="setting-row"><span><strong>Família da fonte</strong><small>Usa fontes instaladas no sistema, com fallback seguro.</small></span><select data-setting="editorFontFamily"><option value="system">Monoespaçada do sistema</option><option value="jetbrains">JetBrains Mono</option><option value="fira">Fira Code</option><option value="consolas">Consolas</option></select></label>
+                <label class="setting-row"><span><strong>Largura da tabulação</strong><small>Número de espaços usados pelo editor.</small></span><select data-setting="tabSize"><option value="2">2 espaços</option><option value="4">4 espaços</option><option value="8">8 espaços</option></select></label>
+                <label class="setting-row"><span><strong>Quebra automática de linha</strong><small>Ajusta linhas longas à largura visível.</small></span><select data-setting="wordWrap"><option value="off">Desativada</option><option value="on">Ativada</option><option value="bounded">Limitada à coluna</option></select></label>
+                <label class="setting-row"><span><strong>Espaços visíveis</strong><small>Controla quando tabs e espaços são desenhados.</small></span><select data-setting="renderWhitespace"><option value="selection">Na seleção</option><option value="all">Sempre</option><option value="none">Nunca</option></select></label>
+                <label class="setting-row setting-toggle"><span><strong>Exibir minimap</strong><small>Mostra uma visão reduzida do arquivo à direita.</small></span><input type="checkbox" data-setting="minimap" role="switch"></label>
+                <label class="setting-row setting-toggle"><span><strong>Ligaduras tipográficas</strong><small>Usa glifos combinados quando a fonte oferecer suporte.</small></span><input type="checkbox" data-setting="fontLigatures" role="switch"></label>
+                <label class="setting-row setting-toggle"><span><strong>Rolagem suave</strong><small>Anima pequenos deslocamentos dentro do código.</small></span><input type="checkbox" data-setting="smoothScrolling" role="switch"></label>
+              </section>
+
+              <section class="settings-section" id="settings-terminal" aria-labelledby="settings-terminal-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">⌘</span><div><h2 id="settings-terminal-title">Terminal</h2><p>Aparência da sessão integrada.</p></div></div>
+                <div class="setting-row">
+                  <div><strong>Tamanho da fonte</strong><small>Aplica-se à saída e à linha de comando.</small></div>
+                  <div class="setting-stepper" aria-label="Tamanho da fonte do terminal"><button type="button" data-setting-adjust="terminalFontSize" data-delta="-1" aria-label="Diminuir fonte do terminal">−</button><output id="terminal-font-size-value">11 px</output><button type="button" data-setting-adjust="terminalFontSize" data-delta="1" aria-label="Aumentar fonte do terminal">＋</button></div>
+                </div>
+              </section>
+
+              <section class="settings-section" id="settings-files" aria-labelledby="settings-files-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">▱</span><div><h2 id="settings-files-title">Arquivos</h2><p>Proteções para o trabalho ainda não salvo.</p></div></div>
+                <label class="setting-row setting-toggle"><span><strong>Confirmar ao descartar alterações</strong><small>Pede confirmação antes de fechar uma aba modificada.</small></span><input type="checkbox" data-setting="confirmDirtyClose" role="switch"></label>
+              </section>
+
+              <section class="settings-section planned-settings" id="settings-planned" aria-labelledby="settings-planned-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">＋</span><div><h2 id="settings-planned-title">Próximas configurações sugeridas</h2><p>Opções recomendadas para evoluir o ambiente.</p></div></div>
+                <div class="planned-grid">
+                  <article><strong>Tema e acessibilidade</strong><p>Claro/escuro, alto contraste, zoom e redução de movimento.</p><span>Planejada</span></article>
+                  <article><strong>Atalhos de teclado</strong><p>Busca, edição e resolução de conflitos entre comandos.</p><span>Planejada</span></article>
+                  <article><strong>Salvar e formatar</strong><p>Auto save, format on save e formatter por linguagem.</p><span>Planejada</span></article>
+                  <article><strong>Terminal e shell</strong><p>Shell padrão, perfis, ambiente e diretório inicial.</p><span>Planejada</span></article>
+                  <article><strong>Git</strong><p>Identidade, assinatura, fetch e confirmações de operações.</p><span>Planejada</span></article>
+                  <article><strong>Plugins e privacidade</strong><p>Atualizações, permissões, rede e dados compartilhados.</p><span>Planejada</span></article>
+                </div>
+              </section>
+            </div>
+          </main>
+          <main class="conversation ai-plugin-control" aria-label="Conversa com o plugin Codex" hidden>
+            <header class="thread-header">
+              <div><p class="eyebrow">Implementação</p><h1>Redesenhar workspace inicial</h1></div>
+              <span class="agent-status" id="agent-status"><span class="status-dot"></span><span>Pronto</span></span>
+            </header>
+
+            <div class="transcript" id="transcript" aria-live="polite" aria-relevant="additions text">
+              <article class="message user-message">
+                <div class="message-author"><span class="avatar small" aria-hidden="true">RB</span><strong>Você</strong><time>14:32</time></div>
+                <p>Transforme o protótipo em uma interface de desenvolvimento como o Codex, mantendo a identidade do Lyra.</p>
+              </article>
+
+              <article class="message agent-message">
+                <div class="message-author"><span class="agent-avatar" aria-hidden="true">L</span><strong>Lyrnova</strong><time>14:33</time></div>
+                <p>Vou preservar a fundação Tauri e substituir a navegação remota por um workspace local. Primeiro mapeei os componentes e a fronteira de segurança.</p>
+                <div class="activity-card complete"><span class="activity-icon" aria-hidden="true">✓</span><span><strong>Leu 8 arquivos</strong><small>Configuração, UI e documentação</small></span><button type="button">Ver contexto</button></div>
+                <div class="activity-card complete"><span class="activity-icon" aria-hidden="true">↯</span><span><strong>Atualizou a arquitetura</strong><small>11 arquivos alterados · +684 −201</small></span><button type="button" data-action="show-changes">Abrir diff</button></div>
+                <p>O chat usa o Codex App Server em sandbox somente leitura. Escritas, comandos e rede controlada exigem uma decisão explícita no cartão de aprovação do Lyrnova.</p>
+              </article>
+            </div>
+
+            <form class="composer" id="composer">
+              <label class="visually-hidden" for="prompt">Mensagem para o agente</label>
+              <textarea id="prompt" name="prompt" rows="2" placeholder="Peça uma alteração, faça uma pergunta ou use @ para adicionar contexto"></textarea>
+              <div class="composer-footer">
+                <div class="composer-tools">
+                  <button class="icon-button" type="button" aria-label="Adicionar contexto">＋</button>
+                  <button class="mode-button" type="button"><span class="status-dot"></span> Local</button>
+                  <button class="mode-button" type="button">Auto <span aria-hidden="true">⌄</span></button>
+                  <button class="mode-button" type="button">Codex · perguntar antes <span aria-hidden="true">⌄</span></button>
+                </div>
+                <button class="send-button" type="submit" aria-label="Enviar mensagem">↑</button>
+              </div>
+            </form>
+          </main>
+
+          <main class="editor-workspace" id="editor-workspace" aria-label="Editor de código">
+            <header class="editor-tabbar">
+              <div class="editor-tabs" id="editor-tabs" role="tablist" aria-label="Arquivos abertos"></div>
+              <div class="editor-actions">
+                <button class="toolbar-button ai-plugin-control" type="button" data-action="return-to-agent" hidden>Conversar com a IA</button>
+                <button class="accent-button save-draft" type="button" data-action="save-document">Salvar <kbd>Ctrl S</kbd></button>
+              </div>
+            </header>
+            <div class="editor-breadcrumb" id="editor-breadcrumb" aria-label="Caminho do arquivo"></div>
+            <div class="source-editor" id="source-editor" aria-label="Conteúdo do arquivo">
+              <div class="editor-empty-state" id="editor-empty-state" aria-hidden="true">
+                <img id="editor-empty-icon" alt="">
+              </div>
+            </div>
+            <footer class="editor-statusbar">
+              <span id="draft-state"><span class="status-dot"></span> Carregando workspace</span>
+              <span id="cursor-position">Ln 1, Col 1</span>
+              <span>Espaços: 2</span>
+              <span id="language-mode">Texto</span>
+              <span>UTF-8</span>
+            </footer>
+          </main>
+
+          <aside class="inspector" id="inspector" aria-label="Inspector do projeto">
+            <div class="inspector-tabs" role="tablist" aria-label="Inspector">
+              <button class="active" type="button" role="tab" aria-selected="true" data-tab="changes">Alterações <span>12</span></button>
+            </div>
+            <section class="tab-panel" data-panel="changes" aria-label="Alterações">
+              <div class="change-summary"><strong>12 arquivos alterados</strong><span class="added">+684</span><span class="removed">−201</span></div>
+              <div class="file-changes">
+                <button class="file-change active" type="button" data-file="ui/index.html"><span class="file-status modified">M</span><span><strong>index.html</strong><small>ui/</small></span><span class="lines"><i>+183</i><em>−42</em></span></button>
+                <button class="file-change" type="button" data-file="ui/styles.css"><span class="file-status modified">M</span><span><strong>styles.css</strong><small>ui/</small></span><span class="lines"><i>+291</i><em>−158</em></span></button>
+                <button class="file-change" type="button" data-file="ui/app.js"><span class="file-status added">A</span><span><strong>app.js</strong><small>ui/</small></span><span class="lines"><i>+142</i></span></button>
+                <button class="file-change" type="button" data-file="src-tauri/src/protocol.rs"><span class="file-status added">A</span><span><strong>protocol.rs</strong><small>src-tauri/src/</small></span><span class="lines"><i>+268</i></span></button>
+              </div>
+              <div class="diff-header"><span>ui/index.html</span><button type="button">Side-by-side</button></div>
+              <pre class="diff" aria-label="Diff de ui/index.html"><code><span class="diff-info">@@ -1,4 +1,7 @@</span>
+<span class="diff-context"> &lt;body&gt;</span>
+<span class="diff-remove">-  &lt;main class="shell"&gt;</span>
+<span class="diff-add">+  &lt;div class="app-shell"&gt;</span>
+<span class="diff-add">+    &lt;aside class="sidebar"&gt;</span>
+<span class="diff-add">+      &lt;nav aria-label="Projetos"&gt;</span>
+<span class="diff-context">       ...</span></code></pre>
+            </section>
+          </aside>
+          <div class="panel-resizer workspace-resizer" id="workspace-resizer" role="separator" aria-label="Redimensionar painel direito" aria-orientation="vertical" tabindex="0"></div>
+        </div>
+
+        <section class="terminal-dock" id="terminal" aria-label="Terminal integrado">
+          <header class="terminal-header">
+            <div><button class="active" type="button">Terminal</button><button type="button">Output</button><button type="button">Problemas <span>0</span></button></div>
+            <div><span>/bin/bash</span><button class="icon-button" type="button" data-action="new-terminal" aria-label="Novo terminal">＋</button><button class="icon-button" type="button" data-action="close-terminal" aria-label="Fechar terminal">×</button></div>
+          </header>
+          <pre class="terminal-output" id="terminal-output" tabindex="0" aria-label="Saída do terminal">Terminal local do Lyrnova · /bin/bash
+</pre>
+          <form class="terminal-form" id="terminal-form"><span class="terminal-prompt" aria-hidden="true">$</span><label class="visually-hidden" for="terminal-input">Comando</label><input id="terminal-input" type="text" autocomplete="off" spellcheck="false" placeholder="Digite um comando e pressione Enter"></form>
+        </section>
+      </section>
+    </div>
+
+    <div class="palette-backdrop" id="command-palette" hidden>
+      <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="palette-title">
+        <h2 class="visually-hidden" id="palette-title">Paleta de comandos</h2>
+        <label><span aria-hidden="true">⌕</span><input id="palette-input" type="search" placeholder="Buscar projetos, arquivos e comandos"></label>
+        <p>Comandos sugeridos</p>
+        <button class="ai-plugin-control" type="button" data-command="new-thread" hidden><span>＋</span><strong>Nova conversa</strong></button>
+        <button type="button" data-command="open-project"><span>▱</span><strong>Abrir projeto</strong><kbd>Ctrl O</kbd></button>
+        <button type="button" data-command="create-project"><span>＋</span><strong>Criar projeto</strong></button>
+        <button type="button" data-command="toggle-terminal"><span>⌘</span><strong>Alternar terminal</strong><kbd>Ctrl `</kbd></button>
+        <button type="button" data-command="show-changes"><span>◧</span><strong>Abrir alterações</strong></button>
+        <button type="button" data-command="open-editor"><span>{ }</span><strong>Abrir editor</strong><kbd>Ctrl 2</kbd></button>
+        <button type="button" data-command="open-settings"><span>⚙</span><strong>Abrir configurações</strong><kbd>Ctrl ,</kbd></button>
+        <button class="ai-plugin-control" type="button" data-command="open-account" hidden><span>↗</span><strong>Conta do Codex</strong></button>
+      </section>
+    </div>
+
+    <dialog class="account-dialog" id="account-dialog" aria-labelledby="account-title">
+      <div class="dialog-heading">
+        <span class="account-mark" aria-hidden="true">L</span>
+        <div><p class="eyebrow">Conta do agente</p><h2 id="account-title">Entrar com OpenAI</h2></div>
+        <button class="icon-button" type="button" data-action="close-account" aria-label="Fechar">×</button>
+      </div>
+      <p class="dialog-copy" id="account-copy">Verificando a sessão local do Codex. O Lyrnova recebe somente os dados necessários para identificar a conta e o plano.</p>
+      <div class="privacy-note"><span aria-hidden="true">◇</span><span><strong id="account-privacy-title">Credenciais protegidas</strong><small id="account-privacy-copy">Tokens, cookies e senhas ficam fora do frontend.</small></span></div>
+      <div class="login-options" id="login-options">
+        <button class="login-option primary" type="button" data-login="browser"><span aria-hidden="true">↗</span><span><strong>Continuar no navegador</strong><small>Fluxo recomendado para desktop</small></span><span aria-hidden="true">›</span></button>
+        <button class="login-option" type="button" data-login="device"><span aria-hidden="true">#</span><span><strong>Usar código de dispositivo</strong><small>Alternativa quando o callback local não funcionar</small></span><span aria-hidden="true">›</span></button>
+      </div>
+      <button class="logout-button" id="logout-button" type="button" data-action="logout-account" hidden>Sair da conta</button>
+      <p class="integration-note" id="integration-note" hidden></p>
+      <p class="independent-note">Lyrnova é um cliente comunitário independente e não é produzido nem endossado pela OpenAI.</p>
+    </dialog>
+    <dialog class="account-dialog project-dialog" id="project-dialog" aria-labelledby="project-dialog-title">
+      <form id="project-form">
+        <div class="dialog-heading">
+          <span class="account-mark" aria-hidden="true">＋</span>
+          <div><p class="eyebrow">Novo workspace</p><h2 id="project-dialog-title">Criar projeto</h2></div>
+          <button class="icon-button" type="button" data-action="close-project-dialog" aria-label="Fechar">×</button>
+        </div>
+        <label class="project-field"><span>Nome do projeto</span><input id="new-project-name" name="name" required maxlength="64" autocomplete="off" placeholder="meu-projeto"></label>
+        <label class="project-check"><input id="new-project-git" type="checkbox" checked><span>Inicializar repositório Git</span></label>
+        <p class="integration-note" id="project-create-note" hidden></p>
+        <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="close-project-dialog">Cancelar</button><button class="accent-button" type="submit">Escolher local e criar</button></div>
+      </form>
+    </dialog>
+    <div class="sr-status visually-hidden" id="sr-status" role="status" aria-live="polite"></div>
+  </body>
+</html>

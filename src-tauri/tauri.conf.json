@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lyrnova",
+  "version": "0.1.0",
+  "identifier": "io.github.w3ti.lyrnova",
+  "build": {
+    "beforeBuildCommand": "npm --prefix ../ui run build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lyrnova",
+        "url": "index.html",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": false,
+        "center": true,
+        "resizable": true,
+        "visible": true,
+        "backgroundColor": "#090d22"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self'; connect-src 'none'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "IDE desktop extensível para desenvolvimento de software",
+    "longDescription": "Lyrnova reúne projetos, editor, Explorer, Git, terminal e plugins opcionais em um IDE desktop local, auditável e controlado pelo usuário.",
+    "icon": [
+      "../assets/icons/lyrnova-icon-32.png",
+      "../assets/icons/lyrnova-icon-128.png",
+      "../assets/icons/lyrnova-icon-256.png",
+      "../assets/icons/lyrnova-icon.ico"
+    ]
+  }
+}
