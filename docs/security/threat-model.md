@@ -37,6 +37,9 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | Ameaça | Controle |
 | --- | --- |
 | Path traversal ou symlink escapa do root | canonicalização, no-follow e validação próxima ao efeito |
+| Busca esgota memória ou interpreta binário | limites de consulta/resultado/bytes; UTF-8 sem NUL |
+| Mutação substitui entrada existente | criação exclusiva e rename sem substituição |
+| Exclusão acidental perde dados | confirmação explícita, quarentena privada e token de restauração |
 | Command injection | argumentos estruturados; shell somente explícito |
 | Plugin tenta ler segredo | roots, deny rules e redaction |
 | Exfiltração | rede negada por padrão e approval por destino |
@@ -80,9 +83,12 @@ são telemetria.
 
 ## Estado atual
 
-O editor já lê e salva arquivos UTF-8 existentes por uma fronteira Rust
-limitada à raiz do projeto, com revisão de conflito. Ele ainda não cria nem
-exclui arquivos e recusa symlinks. O IDE inicia sem provider de IA e não
+O editor lista, busca, cria, lê, salva, aplica patches, move e exclui arquivos
+por uma fronteira Rust limitada à raiz do projeto, com revisões e precondições de
+conflito. Binários nunca são abertos como texto, symlinks são recusados e exclusões
+confirmadas são movidas para recuperação privada durante a sessão. Eventos de
+mutação identificam operação, origem local e revisões sem registrar conteúdo. O
+IDE inicia sem provider de IA e não
 consulta conta nem registra eventos de agente sem um provider ativo. O registro
 resolve essa opção por tipo, capabilities e grants, sem identidade fixa; zero é
 um estado normal e ambiguidade falha fechada. O adapter experimental Codex exige

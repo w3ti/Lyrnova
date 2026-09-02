@@ -1,6 +1,6 @@
 # ADR-0004: Fronteira segura para edição manual de arquivos
 
-- Status: aceita para o protótipo Linux
+- Status: substituída pela ADR-0015
 - Data: 2026-09-01
 
 ## Contexto
@@ -23,7 +23,8 @@ Controles atuais:
 - canonicalização e verificação contra a raiz autorizada;
 - rejeição de symlink em qualquer componente;
 - somente arquivos regulares UTF-8 de até 2 MiB;
-- somente edição de arquivo existente; criação e exclusão não estão expostas;
+- somente edição de arquivo existente; criação e exclusão não estavam expostas
+  nesta etapa inicial;
 - escrita em arquivo temporário no mesmo diretório, `sync_all`, preservação de
   permissões e rename atômico no Linux;
 - `.git`, `target` e `node_modules` não entram no explorer;
@@ -39,11 +40,7 @@ inicialização. Entradas ausentes ou inválidas são ignoradas; sem uma raiz
 válida, o aplicativo inicia no estado “Nenhum projeto” e não concede acesso ao
 diretório home, `/` ou ao diretório de lançamento.
 
-## Limitações conhecidas
+## Evolução
 
-- a substituição atômica precisa de implementação específica antes do suporte
-  de escrita no Windows;
-- file watching, merge de conflitos, arquivos grandes, binários e criação de
-  arquivos ficam para marcos posteriores;
-- o bloqueio de symlink reduz riscos, mas operações baseadas em path ainda
-  exigem revisão contra condições TOCTOU antes da auditoria v1.0.
+A ADR-0015 amplia esta fronteira com busca, metadados, criação, patch,
+movimentação, exclusão recuperável, eventos de mutação e os limites atuais.

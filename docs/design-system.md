@@ -33,6 +33,14 @@ Tokens ficam em `ui/styles.css`:
 - monospace do sistema para diff e terminal;
 - dourado para foco visível.
 
+## Aparência adaptável
+
+A preferência local pode seguir o sistema ou fixar os temas Lyrnova escuro,
+claro e alto contraste. As paletas usam os mesmos tokens semânticos e incluem
+temas correspondentes do Monaco. A fonte global varia de 13 a 20 px sem alterar
+a preferência independente do editor. Densidade compacta reduz alturas e
+espaçamentos; redução de movimento desativa animações, transições e rolagem suave.
+
 ## Regras
 
 - código, diff e texto têm prioridade sobre decoração;

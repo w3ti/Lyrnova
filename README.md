@@ -80,7 +80,9 @@ gerenciador nativo para instalação e atualizações.
 
 O projeto está na fase de fundação funcional. O workspace Tauri 2 já oferece
 criação e abertura nativa de projetos, Explorer, Monaco Editor, abas, syntax e
-autocomplete, operações Git locais, terminal e painéis redimensionáveis. A
+autocomplete, busca limitada por nome/conteúdo e operações seguras de criação,
+patch, movimentação e exclusão recuperável no workspace. Também oferece operações
+Git locais, terminal e painéis redimensionáveis. A
 plataforma de plugins já cobre manifesto, instalação transacional, catálogo,
 remoção, lifecycle sandboxed e protocolo funcional limitado por capability.
 

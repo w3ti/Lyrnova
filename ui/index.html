@@ -9,7 +9,7 @@
     <script type="module" src="/app.js"></script>
   </head>
   <body>
-    <div class="app-shell" data-sidebar-open="false" data-inspector-open="false" data-chat-open="false" data-activity-panel="explorer" data-workspace-view="editor" data-ai-plugin-enabled="false">
+    <div class="app-shell" data-sidebar-open="false" data-inspector-open="false" data-chat-open="false" data-activity-panel="explorer" data-workspace-view="editor" data-ai-plugin-enabled="false" data-app-theme="dark" data-interface-density="comfortable" data-reduce-motion="false">
       <nav class="activity-bar" aria-label="Áreas do workspace">
         <span class="activity-brand" aria-label="Lyrnova">L</span>
         <button class="activity-button active" type="button" data-activity="explorer" title="Explorer" aria-label="Explorer" aria-pressed="true">▱</button>
@@ -34,9 +34,9 @@
             <span class="project-copy"><strong id="project-name">Lyrnova</strong><small id="project-git-summary">Carregando Git…</small></span>
             <span class="project-menu" aria-hidden="true">•••</span>
           </button>
-          <div class="section-heading file-heading"><span>Explorer</span><button class="icon-button" type="button" aria-label="Mais ações de arquivo">•••</button></div>
+          <div class="section-heading file-heading"><span>Explorer</span><span class="heading-actions file-actions"><button class="icon-button" type="button" data-action="new-file" title="Novo arquivo" aria-label="Novo arquivo">＋</button><button class="icon-button" type="button" data-action="new-directory" title="Nova pasta" aria-label="Nova pasta">▱</button><button class="icon-button" type="button" data-action="move-entry" title="Mover ou renomear seleção" aria-label="Mover ou renomear seleção">↗</button><button class="icon-button danger-icon" type="button" data-action="delete-entry" title="Excluir seleção" aria-label="Excluir seleção">×</button><button class="icon-button" type="button" data-action="refresh-files" title="Atualizar" aria-label="Atualizar arquivos">↻</button></span></div>
           <section class="sidebar-files" aria-label="Arquivos do projeto">
-            <label class="file-filter"><span aria-hidden="true">⌕</span><input id="file-filter" type="search" placeholder="Filtrar arquivos"></label>
+            <label class="file-filter"><span aria-hidden="true">⌕</span><input id="file-filter" type="search" maxlength="256" placeholder="Buscar nome e conteúdo"></label>
             <div class="file-tree" role="tree">
               <button type="button" role="treeitem" aria-expanded="true"><span class="file-type-icon folder">▾</span><span>src-tauri</span></button>
               <button class="nested" type="button" role="treeitem" data-file="src-tauri/src/backend.rs"><span class="file-type-icon rust">Rs</span><span>backend.rs</span></button>
@@ -48,6 +48,7 @@
               <button type="button" role="treeitem" data-file="Cargo.toml"><span class="file-type-icon toml">T</span><span>Cargo.toml</span></button>
               <button type="button" role="treeitem" data-file="README.md"><span class="file-type-icon markdown">M</span><span>README.md</span></button>
             </div>
+            <div class="workspace-recovery" id="workspace-recovery" role="status" hidden><span id="workspace-recovery-copy"></span><button type="button" data-action="restore-entry">Desfazer</button></div>
           </section>
         </section>
 
@@ -82,6 +83,7 @@
         <section class="sidebar-panel settings-panel" aria-label="Configurações">
           <div class="section-heading"><span>Configurações</span></div>
           <nav class="settings-nav" aria-label="Categorias de configurações">
+            <button type="button" data-settings-target="settings-appearance"><span>◐</span><span><strong>Aparência</strong><small>Tema, tamanho e densidade do app</small></span></button>
             <button type="button" data-settings-target="settings-editor"><span>{ }</span><span><strong>Editor</strong><small>Fonte, minimap e comportamento</small></span></button>
             <button type="button" data-settings-target="settings-terminal"><span>⌘</span><span><strong>Terminal</strong><small>Aparência do terminal integrado</small></span></button>
             <button type="button" data-settings-target="settings-files"><span>▱</span><span><strong>Arquivos</strong><small>Proteção de alterações locais</small></span></button>
@@ -126,6 +128,17 @@
               <button class="secondary-button" type="button" data-action="reset-settings">Restaurar padrões</button>
             </header>
             <div class="settings-scroll">
+              <section class="settings-section" id="settings-appearance" aria-labelledby="settings-appearance-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">◐</span><div><h2 id="settings-appearance-title">Aparência</h2><p>Tema, escala visual e movimento de toda a interface.</p></div></div>
+                <label class="setting-row"><span><strong>Tema do aplicativo</strong><small>Segue o sistema ou usa uma paleta fixa.</small></span><select data-setting="appTheme"><option value="system">Usar tema do sistema</option><option value="dark">Lyrnova escuro</option><option value="light">Lyrnova claro</option><option value="high-contrast">Alto contraste</option></select></label>
+                <div class="setting-row">
+                  <div><strong>Tamanho da fonte do aplicativo</strong><small>Altera menus, painéis, botões e configurações; o editor é configurado separadamente.</small></div>
+                  <div class="setting-stepper" aria-label="Tamanho da fonte do aplicativo"><button type="button" data-setting-adjust="appFontSize" data-delta="-1" aria-label="Diminuir fonte do aplicativo">−</button><output id="app-font-size-value">16 px</output><button type="button" data-setting-adjust="appFontSize" data-delta="1" aria-label="Aumentar fonte do aplicativo">＋</button></div>
+                </div>
+                <label class="setting-row"><span><strong>Densidade da interface</strong><small>Ajusta o espaço vertical dos controles sem mudar o conteúdo.</small></span><select data-setting="interfaceDensity"><option value="comfortable">Confortável</option><option value="compact">Compacta</option></select></label>
+                <label class="setting-row setting-toggle"><span><strong>Reduzir movimento</strong><small>Remove animações e rolagem suave da interface.</small></span><input type="checkbox" data-setting="reduceMotion" role="switch"></label>
+              </section>
+
               <section class="settings-section" id="settings-editor" aria-labelledby="settings-editor-title">
                 <div class="settings-section-heading"><span class="settings-section-icon">{ }</span><div><h2 id="settings-editor-title">Editor</h2><p>Tipografia, navegação e representação do código.</p></div></div>
                 <div class="setting-row">
@@ -166,7 +179,7 @@
               <section class="settings-section planned-settings" id="settings-planned" aria-labelledby="settings-planned-title">
                 <div class="settings-section-heading"><span class="settings-section-icon">＋</span><div><h2 id="settings-planned-title">Próximas configurações sugeridas</h2><p>Opções recomendadas para evoluir o ambiente.</p></div></div>
                 <div class="planned-grid">
-                  <article><strong>Tema e acessibilidade</strong><p>Claro/escuro, alto contraste, zoom e redução de movimento.</p><span>Planejada</span></article>
+                  <article><strong>Zoom por workspace</strong><p>Perfis de escala específicos por monitor e projeto.</p><span>Planejada</span></article>
                   <article><strong>Atalhos de teclado</strong><p>Busca, edição e resolução de conflitos entre comandos.</p><span>Planejada</span></article>
                   <article><strong>Salvar e formatar</strong><p>Auto save, format on save e formatter por linguagem.</p><span>Planejada</span></article>
                   <article><strong>Terminal e shell</strong><p>Shell padrão, perfis, ambiente e diretório inicial.</p><span>Planejada</span></article>

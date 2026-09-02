@@ -76,6 +76,7 @@ const sourceEditor = document.querySelector("#source-editor");
 const editorEmptyState = document.querySelector("#editor-empty-state");
 const editorEmptyIcon = document.querySelector("#editor-empty-icon");
 const settingsWorkspace = document.querySelector("#settings-workspace");
+const appFontSizeValue = document.querySelector("#app-font-size-value");
 const editorFontSizeValue = document.querySelector("#editor-font-size-value");
 const terminalFontSizeValue = document.querySelector("#terminal-font-size-value");
 const cursorPosition = document.querySelector("#cursor-position");
@@ -83,6 +84,8 @@ const languageMode = document.querySelector("#language-mode");
 const draftState = document.querySelector("#draft-state");
 const fileTree = document.querySelector(".file-tree");
 const fileFilter = document.querySelector("#file-filter");
+const workspaceRecovery = document.querySelector("#workspace-recovery");
+const workspaceRecoveryCopy = document.querySelector("#workspace-recovery-copy");
 const gitActivityBadge = document.querySelector("#git-activity-badge");
 const gitBranchName = document.querySelector("#git-branch-name");
 const gitBranchSummary = document.querySelector("#git-branch-summary");
@@ -111,6 +114,10 @@ const PLUGIN_PERMISSION_LABELS = Object.freeze({
   request_approval: ["Solicitar aprovações", "Pode pedir autorização para ações sensíveis."],
 });
 const DEFAULT_IDE_SETTINGS = Object.freeze({
+  appTheme: "system",
+  appFontSize: 16,
+  interfaceDensity: "comfortable",
+  reduceMotion: false,
   editorFontSize: 12,
   editorFontFamily: "system",
   tabSize: 2,
@@ -230,6 +237,10 @@ const openDocuments = ["src-tauri/src/backend.rs"];
 let activeDocument = openDocuments[0];
 let workspaceEntries = [];
 const collapsedDirectories = new Set();
+let selectedWorkspacePath = null;
+const workspaceRecoveries = [];
+let workspaceSearchSequence = 0;
+let workspaceSearchTimer = null;
 let codeEditor = null;
 const editorModels = new Map();
 let activeAgentThreadId = null;
@@ -243,6 +254,7 @@ const pendingApprovalCards = new Map();
 let currentProject = null;
 
 const narrowWorkspace = window.matchMedia("(max-width: 900px)");
+const systemDarkTheme = window.matchMedia("(prefers-color-scheme: dark)");
 
 function announce(message) {
   srStatus.textContent = "";
@@ -255,10 +267,16 @@ function clampInteger(value, minimum, maximum, fallback) {
 }
 
 function sanitizeIdeSettings(value = {}) {
+  const appThemes = ["system", "dark", "light", "high-contrast"];
+  const interfaceDensities = ["comfortable", "compact"];
   const fontFamilies = ["system", "jetbrains", "fira", "consolas"];
   const wordWrapModes = ["off", "on", "bounded"];
   const whitespaceModes = ["selection", "all", "none"];
   return {
+    appTheme: appThemes.includes(value.appTheme) ? value.appTheme : DEFAULT_IDE_SETTINGS.appTheme,
+    appFontSize: clampInteger(value.appFontSize, 13, 20, DEFAULT_IDE_SETTINGS.appFontSize),
+    interfaceDensity: interfaceDensities.includes(value.interfaceDensity) ? value.interfaceDensity : DEFAULT_IDE_SETTINGS.interfaceDensity,
+    reduceMotion: typeof value.reduceMotion === "boolean" ? value.reduceMotion : DEFAULT_IDE_SETTINGS.reduceMotion,
     editorFontSize: clampInteger(value.editorFontSize, 10, 28, DEFAULT_IDE_SETTINGS.editorFontSize),
     editorFontFamily: fontFamilies.includes(value.editorFontFamily) ? value.editorFontFamily : DEFAULT_IDE_SETTINGS.editorFontFamily,
     tabSize: [2, 4, 8].includes(Number(value.tabSize)) ? Number(value.tabSize) : DEFAULT_IDE_SETTINGS.tabSize,
@@ -290,6 +308,7 @@ function editorFontFamilyCss(value) {
 }
 
 function renderSettingsControls() {
+  appFontSizeValue.textContent = `${ideSettings.appFontSize} px`;
   editorFontSizeValue.textContent = `${ideSettings.editorFontSize} px`;
   terminalFontSizeValue.textContent = `${ideSettings.terminalFontSize} px`;
   document.querySelectorAll("[data-setting]").forEach((control) => {
@@ -302,6 +321,15 @@ function renderSettingsControls() {
 
 function applyIdeSettings(persist = true) {
   ideSettings = sanitizeIdeSettings(ideSettings);
+  const appTheme = ideSettings.appTheme === "system"
+    ? (systemDarkTheme.matches ? "dark" : "light")
+    : ideSettings.appTheme;
+  document.documentElement.dataset.appTheme = appTheme;
+  appShell.dataset.appTheme = appTheme;
+  appShell.dataset.interfaceDensity = ideSettings.interfaceDensity;
+  appShell.dataset.reduceMotion = String(ideSettings.reduceMotion);
+  document.documentElement.style.fontSize = `${ideSettings.appFontSize}px`;
+  monaco.editor.setTheme(appTheme === "light" ? "lyrnova-light" : (appTheme === "high-contrast" ? "lyrnova-high-contrast" : "lyrnova-dark"));
   codeEditor?.updateOptions({
     fontFamily: editorFontFamilyCss(ideSettings.editorFontFamily),
     fontLigatures: ideSettings.fontLigatures,
@@ -817,6 +845,54 @@ function initializeCodeEditor() {
       { token: "number", foreground: "e5bc60" },
       { token: "type", foreground: "77cce2" },
       { token: "type.identifier", foreground: "77cce2" },
+    ],
+  });
+  monaco.editor.defineTheme("lyrnova-light", {
+    base: "vs",
+    inherit: true,
+    colors: {
+      "editor.background": "#fbfaff",
+      "editor.foreground": "#303244",
+      "editorCursor.foreground": "#7650bf",
+      "editor.lineHighlightBackground": "#f1edf8",
+      "editorLineNumber.foreground": "#9a96a8",
+      "editorLineNumber.activeForeground": "#555366",
+      "editor.selectionBackground": "#c9b8e866",
+      "editor.inactiveSelectionBackground": "#ded4ee66",
+      "editorIndentGuide.background1": "#e2ddeb",
+      "editorIndentGuide.activeBackground1": "#aaa1bc",
+      "editorSuggestWidget.background": "#ffffff",
+      "editorSuggestWidget.border": "#d9d2e5",
+      "editorSuggestWidget.selectedBackground": "#eee8f7",
+    },
+    rules: [
+      { token: "comment", foreground: "777487", fontStyle: "italic" },
+      { token: "keyword", foreground: "7042b6" },
+      { token: "string", foreground: "287858" },
+      { token: "number", foreground: "9a6414" },
+      { token: "type", foreground: "176c83" },
+      { token: "type.identifier", foreground: "176c83" },
+    ],
+  });
+  monaco.editor.defineTheme("lyrnova-high-contrast", {
+    base: "hc-black",
+    inherit: true,
+    colors: {
+      "editor.background": "#000000",
+      "editor.foreground": "#ffffff",
+      "editorCursor.foreground": "#65e7ff",
+      "editor.lineHighlightBackground": "#171717",
+      "editorLineNumber.foreground": "#b8b8b8",
+      "editorLineNumber.activeForeground": "#ffffff",
+      "editor.selectionBackground": "#7755aa",
+    },
+    rules: [
+      { token: "comment", foreground: "CFCFCF", fontStyle: "italic" },
+      { token: "keyword", foreground: "E2B7FF" },
+      { token: "string", foreground: "8DFFC5" },
+      { token: "number", foreground: "FFE078" },
+      { token: "type", foreground: "79E9FF" },
+      { token: "type.identifier", foreground: "79E9FF" },
     ],
   });
   registerRustCompletions();
@@ -1527,7 +1603,7 @@ function showWorkspaceView(view, focusEditor = false) {
   announce("Editor central focado");
 }
 
-async function openDocument(path, focusEditor = true) {
+async function openDocument(path, focusEditor = true, targetLine = null) {
   if (invoke && !documentRevisions.has(path)) {
     try {
       const snapshot = await invoke("workspace_read", { path });
@@ -1536,7 +1612,7 @@ async function openDocument(path, focusEditor = true) {
       documentRevisions.set(path, snapshot.revision);
     } catch (error) {
       if (!draftDocuments.has(path)) {
-        setEditorError(error?.code === "not_utf8" ? "Arquivo binário não pode ser editado" : "Não foi possível abrir o arquivo");
+        setEditorError(["binary_file", "not_utf8"].includes(error?.code) ? "Arquivo binário não pode ser editado" : "Não foi possível abrir o arquivo");
         return;
       }
     }
@@ -1551,6 +1627,11 @@ async function openDocument(path, focusEditor = true) {
     editorModels.set(path, model);
   }
   codeEditor.setModel(model);
+  if (Number.isInteger(targetLine) && targetLine > 0) {
+    const lineNumber = Math.min(targetLine, model.getLineCount());
+    codeEditor.setPosition({ lineNumber, column: 1 });
+    codeEditor.revealLineInCenter(lineNumber);
+  }
   languageMode.textContent = languageFor(path);
   renderBreadcrumb(path);
   updateCursorPosition();
@@ -1595,7 +1676,7 @@ async function saveDocument() {
   }
 }
 
-function renderWorkspaceTree(filter = "") {
+function renderWorkspaceTree() {
   fileTree.replaceChildren();
   if (!workspaceEntries.length) {
     const empty = document.createElement("p");
@@ -1604,32 +1685,20 @@ function renderWorkspaceTree(filter = "") {
     fileTree.append(empty);
     return;
   }
-  const query = filter.trim().toLocaleLowerCase("pt-BR");
-
   workspaceEntries.forEach((entry) => {
-    const normalizedPath = entry.path.toLocaleLowerCase("pt-BR");
-    if (query) {
-      const matches = normalizedPath.includes(query);
-      const containsMatch = entry.kind === "directory" && workspaceEntries.some((candidate) => (
-        candidate.kind === "file"
-        && candidate.path.startsWith(`${entry.path}/`)
-        && candidate.path.toLocaleLowerCase("pt-BR").includes(query)
-      ));
-      if (!matches && !containsMatch) return;
-    } else {
-      const parts = entry.path.split("/");
-      const hiddenByParent = parts.slice(0, -1).some((_, index) => collapsedDirectories.has(parts.slice(0, index + 1).join("/")));
-      if (hiddenByParent) return;
-    }
+    const parts = entry.path.split("/");
+    const hiddenByParent = parts.slice(0, -1).some((_, index) => collapsedDirectories.has(parts.slice(0, index + 1).join("/")));
+    if (hiddenByParent) return;
 
     const button = document.createElement("button");
     button.type = "button";
     button.role = "treeitem";
     button.style.setProperty("--tree-depth", String(entry.path.split("/").length - 1));
+    button.classList.toggle("selected", entry.path === selectedWorkspacePath);
     if (entry.kind === "directory") {
-      const expanded = query || !collapsedDirectories.has(entry.path);
+      const expanded = !collapsedDirectories.has(entry.path);
       button.setAttribute("aria-expanded", String(expanded));
-      button.className = "workspace-directory";
+      button.classList.add("workspace-directory");
       button.dataset.directory = entry.path;
       const chevron = document.createElement("span");
       chevron.className = "folder-chevron";
@@ -1641,7 +1710,7 @@ function renderWorkspaceTree(filter = "") {
       name.textContent = entry.name;
       button.append(chevron, icon, name);
     } else {
-      button.className = "workspace-file";
+      button.classList.add("workspace-file");
       button.dataset.file = entry.path;
       const kind = document.createElement("span");
       const [icon, iconClass] = fileIconFor(entry.path);
@@ -1656,18 +1725,223 @@ function renderWorkspaceTree(filter = "") {
   });
 }
 
-async function loadWorkspaceTree() {
+function renderWorkspaceSearchResults(results, query) {
+  fileTree.replaceChildren();
+  if (!results.length) {
+    const empty = document.createElement("p");
+    empty.className = "git-empty";
+    empty.textContent = `Nenhum resultado para “${query}”.`;
+    fileTree.append(empty);
+    return;
+  }
+  results.forEach((result) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.role = "treeitem";
+    button.className = "workspace-search-result";
+    button.classList.toggle("selected", result.path === selectedWorkspacePath);
+    if (result.entryKind === "directory") button.dataset.directory = result.path;
+    else button.dataset.file = result.path;
+    if (result.line) button.dataset.line = String(result.line);
+    const kind = document.createElement("span");
+    if (result.entryKind === "directory") {
+      kind.className = "folder-icon";
+      kind.setAttribute("aria-hidden", "true");
+    } else {
+      const [icon, iconClass] = fileIconFor(result.path);
+      kind.className = `file-type-icon ${iconClass}`;
+      kind.textContent = icon;
+    }
+    const copy = document.createElement("span");
+    copy.className = "workspace-search-copy";
+    const title = document.createElement("strong");
+    title.textContent = result.line ? `${result.path}:${result.line}:${result.column ?? 1}` : result.path;
+    const preview = document.createElement("small");
+    preview.textContent = result.preview;
+    copy.append(title, preview);
+    button.append(kind, copy);
+    fileTree.append(button);
+  });
+}
+
+async function searchWorkspace() {
+  const query = fileFilter.value.trim();
+  const sequence = ++workspaceSearchSequence;
+  if (!query) {
+    renderWorkspaceTree();
+    return;
+  }
+  if (!invoke) return;
+  try {
+    const results = await invoke("workspace_search", { query });
+    if (sequence === workspaceSearchSequence && query === fileFilter.value.trim()) {
+      renderWorkspaceSearchResults(results, query);
+    }
+  } catch {
+    if (sequence === workspaceSearchSequence) {
+      renderWorkspaceSearchResults([], query);
+      announce("A busca do workspace foi recusada");
+    }
+  }
+}
+
+function scheduleWorkspaceSearch() {
+  window.clearTimeout(workspaceSearchTimer);
+  workspaceSearchTimer = window.setTimeout(() => void searchWorkspace(), 180);
+}
+
+async function loadWorkspaceTree(resetCollapse = true) {
   if (!invoke) return;
   try {
     workspaceEntries = await invoke("workspace_list");
-    collapsedDirectories.clear();
-    workspaceEntries
-      .filter((entry) => entry.kind === "directory")
-      .forEach((entry) => collapsedDirectories.add(entry.path));
-    renderWorkspaceTree();
+    if (resetCollapse) {
+      collapsedDirectories.clear();
+      workspaceEntries
+        .filter((entry) => entry.kind === "directory")
+        .forEach((entry) => collapsedDirectories.add(entry.path));
+    } else {
+      const directories = new Set(workspaceEntries.filter((entry) => entry.kind === "directory").map((entry) => entry.path));
+      [...collapsedDirectories].forEach((path) => { if (!directories.has(path)) collapsedDirectories.delete(path); });
+    }
+    if (selectedWorkspacePath && !workspaceEntries.some((entry) => entry.path === selectedWorkspacePath)) selectedWorkspacePath = null;
+    if (fileFilter.value.trim()) await searchWorkspace();
+    else renderWorkspaceTree();
   } catch {
     workspaceEntries = [];
     renderWorkspaceTree();
+  }
+}
+
+function selectedEntry() {
+  return workspaceEntries.find((entry) => entry.path === selectedWorkspacePath) ?? null;
+}
+
+function workspaceParentForCreation() {
+  const entry = selectedEntry();
+  if (!entry) return "";
+  if (entry.kind === "directory") return `${entry.path}/`;
+  const separator = entry.path.lastIndexOf("/");
+  return separator >= 0 ? entry.path.slice(0, separator + 1) : "";
+}
+
+function workspaceErrorMessage(error) {
+  const messages = {
+    entry_already_exists: "Já existe uma entrada nesse caminho.",
+    invalid_path: "Use um caminho relativo válido dentro do projeto.",
+    path_escapes_workspace: "O caminho sairia do projeto.",
+    symbolic_link: "Links simbólicos não podem ser usados nesta operação.",
+    conflict: "O arquivo mudou no disco; atualize e tente novamente.",
+    recovery_unavailable: "A área segura de recuperação não está disponível.",
+    unknown_recovery: "Esta exclusão não pode mais ser desfeita.",
+  };
+  return messages[error?.code] ?? "A operação de arquivo foi recusada.";
+}
+
+async function createWorkspaceDocument() {
+  if (!invoke || !currentProject) return;
+  const path = window.prompt("Caminho do novo arquivo, relativo ao projeto:", workspaceParentForCreation());
+  if (path === null) return;
+  try {
+    const snapshot = await invoke("workspace_create_document", { request: { path, content: "" } });
+    selectedWorkspacePath = snapshot.path;
+    await loadWorkspaceTree(false);
+    await openDocument(snapshot.path);
+    void loadGitStatus();
+    announce(`${snapshot.path} criado`);
+  } catch (error) {
+    announce(workspaceErrorMessage(error));
+  }
+}
+
+async function createWorkspaceDirectory() {
+  if (!invoke || !currentProject) return;
+  const path = window.prompt("Caminho da nova pasta, relativo ao projeto:", workspaceParentForCreation());
+  if (path === null) return;
+  try {
+    const entry = await invoke("workspace_create_directory", { path });
+    selectedWorkspacePath = entry.path;
+    collapsedDirectories.delete(entry.path);
+    await loadWorkspaceTree(false);
+    void loadGitStatus();
+    announce(`${entry.path} criada`);
+  } catch (error) {
+    announce(workspaceErrorMessage(error));
+  }
+}
+
+function affectedDocuments(path) {
+  return [...new Set([...openDocuments, ...draftDocuments.keys()])]
+    .filter((candidate) => candidate === path || candidate.startsWith(`${path}/`));
+}
+
+async function purgeDocumentStates(paths) {
+  for (const path of paths) {
+    if (openDocuments.includes(path)) await closeDocument(path);
+    editorModels.get(path)?.dispose();
+    editorModels.delete(path);
+    savedDocuments.delete(path);
+    draftDocuments.delete(path);
+    documentRevisions.delete(path);
+  }
+}
+
+async function moveWorkspaceEntry() {
+  const entry = selectedEntry();
+  if (!invoke || !entry) { announce("Selecione um arquivo ou pasta para mover"); return; }
+  const affected = affectedDocuments(entry.path);
+  if (affected.some(isDirty)) { announce("Salve ou descarte os rascunhos afetados antes de mover"); return; }
+  const destination = window.prompt("Novo caminho relativo ao projeto:", entry.path);
+  if (destination === null || destination === entry.path) return;
+  try {
+    const moved = await invoke("workspace_move", { request: { source: entry.path, destination } });
+    await purgeDocumentStates(affected);
+    selectedWorkspacePath = moved.path;
+    await loadWorkspaceTree(false);
+    if (moved.kind === "file") await openDocument(moved.path);
+    void loadGitStatus();
+    announce(`${entry.path} movido para ${moved.path}`);
+  } catch (error) {
+    announce(workspaceErrorMessage(error));
+  }
+}
+
+async function deleteWorkspaceEntry() {
+  const entry = selectedEntry();
+  if (!invoke || !entry) { announce("Selecione um arquivo ou pasta para excluir"); return; }
+  const affected = affectedDocuments(entry.path);
+  if (affected.some(isDirty)) { announce("Salve ou descarte os rascunhos afetados antes de excluir"); return; }
+  if (!window.confirm(`Excluir “${entry.path}”? A exclusão poderá ser desfeita durante esta sessão.`)) return;
+  try {
+    const expectedRevision = entry.kind === "file" ? (documentRevisions.get(entry.path) ?? null) : null;
+    const recovery = await invoke("workspace_delete", { request: { path: entry.path, expectedRevision } });
+    workspaceRecoveries.push(recovery);
+    await purgeDocumentStates(affected);
+    selectedWorkspacePath = null;
+    workspaceRecoveryCopy.textContent = `${entry.path} removido`;
+    workspaceRecovery.hidden = false;
+    await loadWorkspaceTree(false);
+    void loadGitStatus();
+    announce(`${entry.path} excluído; use Desfazer para restaurar`);
+  } catch (error) {
+    announce(workspaceErrorMessage(error));
+  }
+}
+
+async function restoreWorkspaceEntry() {
+  const latestRecovery = workspaceRecoveries.at(-1);
+  if (!invoke || !latestRecovery) return;
+  try {
+    const entry = await invoke("workspace_restore", { recoveryToken: latestRecovery.recoveryToken });
+    workspaceRecoveries.pop();
+    const previous = workspaceRecoveries.at(-1);
+    workspaceRecovery.hidden = !previous;
+    if (previous) workspaceRecoveryCopy.textContent = `${previous.path} removido`;
+    selectedWorkspacePath = entry.path;
+    await loadWorkspaceTree(false);
+    void loadGitStatus();
+    announce(`${entry.path} restaurado`);
+  } catch (error) {
+    announce(workspaceErrorMessage(error));
   }
 }
 
@@ -1715,6 +1989,10 @@ function clearEditorWorkspace() {
   draftDocuments.clear();
   documentRevisions.clear();
   openDocuments.splice(0, openDocuments.length);
+  selectedWorkspacePath = null;
+  workspaceRecoveries.splice(0, workspaceRecoveries.length);
+  workspaceRecovery.hidden = true;
+  fileFilter.value = "";
   activeDocument = null;
   codeEditor.setModel(null);
   editorTabs.replaceChildren();
@@ -2175,6 +2453,12 @@ document.addEventListener("click", (event) => {
     if (action === "show-agent-panel") showWorkspaceView("agent");
     if (action === "focus-editor") showWorkspaceView("editor", true);
     if (action === "save-document") void saveDocument();
+    if (action === "new-file") void createWorkspaceDocument();
+    if (action === "new-directory") void createWorkspaceDirectory();
+    if (action === "move-entry") void moveWorkspaceEntry();
+    if (action === "delete-entry") void deleteWorkspaceEntry();
+    if (action === "restore-entry") void restoreWorkspaceEntry();
+    if (action === "refresh-files") void loadWorkspaceTree(false);
     if (action === "refresh-git") void loadGitStatus();
     if (action === "git-commit") void commitGitChanges();
     if (action === "open-project") void openProjectDialog();
@@ -2236,14 +2520,23 @@ document.addEventListener("click", (event) => {
   }
 
   const file = event.target.closest("[data-file]");
-  if (file) void openDocument(file.dataset.file);
+  if (file) {
+    selectedWorkspacePath = file.dataset.file;
+    void openDocument(file.dataset.file, true, Number.parseInt(file.dataset.line, 10) || null);
+    if (fileFilter.value.trim()) void searchWorkspace();
+    else renderWorkspaceTree();
+  }
 
   const directory = event.target.closest("[data-directory]");
   if (directory) {
     const path = directory.dataset.directory;
-    if (collapsedDirectories.has(path)) collapsedDirectories.delete(path);
+    selectedWorkspacePath = path;
+    if (fileFilter.value.trim()) {
+      fileFilter.value = "";
+      path.split("/").forEach((_, index, parts) => collapsedDirectories.delete(parts.slice(0, index + 1).join("/")));
+    } else if (collapsedDirectories.has(path)) collapsedDirectories.delete(path);
     else collapsedDirectories.add(path);
-    renderWorkspaceTree(fileFilter.value);
+    renderWorkspaceTree();
     announce(`${documentName(path)} ${collapsedDirectories.has(path) ? "recolhida" : "expandida"}`);
   }
 
@@ -2349,7 +2642,7 @@ prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); composer.requestSubmit(); }
 });
 
-fileFilter.addEventListener("input", () => renderWorkspaceTree(fileFilter.value));
+fileFilter.addEventListener("input", scheduleWorkspaceSearch);
 gitCommitMessage.addEventListener("input", updateGitCommitButton);
 document.querySelectorAll("[data-setting]").forEach((control) => {
   control.addEventListener("change", () => {
@@ -2375,6 +2668,9 @@ document.addEventListener("keydown", (event) => {
 if (narrowWorkspace.matches) toggleInspector(false);
 narrowWorkspace.addEventListener("change", (event) => {
   if (event.matches) toggleInspector(false);
+});
+systemDarkTheme.addEventListener("change", () => {
+  if (ideSettings.appTheme === "system") applyIdeSettings(false);
 });
 
 initializeCodeEditor();

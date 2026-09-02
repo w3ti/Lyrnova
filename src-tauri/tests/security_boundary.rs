@@ -163,3 +163,54 @@ fn local_workspace_has_no_remote_resources() {
         );
     }
 }
+
+#[test]
+fn workspace_mutations_require_explicit_paths_and_recoverable_delete_confirmation() {
+    let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
+        .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
+    let rust = fs::read_to_string(manifest_dir().join("src/lib.rs"))
+        .expect("command boundary must be readable");
+
+    for action in [
+        "new-file",
+        "new-directory",
+        "move-entry",
+        "delete-entry",
+        "restore-entry",
+    ] {
+        assert!(html.contains(&format!("data-action=\"{action}\"")));
+    }
+    assert!(javascript.contains("if (path === null) return;"));
+    assert!(javascript.contains("if (destination === null || destination === entry.path) return;"));
+    assert!(javascript.contains("if (!window.confirm(`Excluir"));
+    assert!(javascript.contains("invoke(\"workspace_delete\""));
+    assert!(javascript.contains("invoke(\"workspace_restore\""));
+    assert!(rust.contains("\"workspace-mutated\""));
+    assert!(rust.contains("initiator: \"local_user\""));
+}
+
+#[test]
+fn appearance_preferences_are_local_bounded_and_theme_the_editor() {
+    let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
+        .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
+    let styles = fs::read_to_string(manifest_dir().join("../ui/styles.css"))
+        .expect("local styles must be readable");
+
+    assert!(html.contains("id=\"settings-appearance\""));
+    for setting in ["appTheme", "interfaceDensity", "reduceMotion"] {
+        assert!(html.contains(&format!("data-setting=\"{setting}\"")));
+        assert!(javascript.contains(&format!("{setting}:")));
+    }
+    assert!(html.contains("data-setting-adjust=\"appFontSize\""));
+    assert!(javascript.contains("appFontSize:"));
+    assert!(javascript.contains("clampInteger(value.appFontSize, 13, 20"));
+    assert!(javascript.contains("localStorage.setItem(\"lyrnova.ideSettings\""));
+    assert!(javascript.contains("monaco.editor.setTheme"));
+    assert!(styles.contains("data-app-theme=\"light\""));
+    assert!(styles.contains("data-app-theme=\"high-contrast\""));
+    assert!(styles.contains("data-reduce-motion=\"true\""));
+}

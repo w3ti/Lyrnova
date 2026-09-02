@@ -37,7 +37,11 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use terminal::{TerminalError, TerminalService};
 use workspace::{
-    DocumentSnapshot, SaveDocumentRequest, WorkspaceEntry, WorkspaceError, WorkspaceService,
+    ApplyDocumentPatchRequest, CreateDocumentRequest, DeleteWorkspaceEntryRequest,
+    DeletedWorkspaceEntry, DocumentPatchPreview, DocumentRangeSnapshot, DocumentSnapshot,
+    MoveWorkspaceEntryRequest, ReadDocumentRangeRequest, SaveDocumentRequest, WorkspaceEntry,
+    WorkspaceError, WorkspaceMetadata, WorkspaceRecoveryService, WorkspaceSearchMatch,
+    WorkspaceService,
 };
 
 #[derive(Clone)]
@@ -112,6 +116,47 @@ struct ProjectSummary {
     name: String,
     path: String,
     has_git: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceMutationEvent {
+    event_id: String,
+    initiator: &'static str,
+    operation: &'static str,
+    path: String,
+    destination: Option<String>,
+    before_revision: Option<String>,
+    after_revision: Option<String>,
+}
+
+fn emit_workspace_mutation(
+    window: &tauri::WebviewWindow,
+    operation: &'static str,
+    path: String,
+    destination: Option<String>,
+    before_revision: Option<String>,
+    after_revision: Option<String>,
+) {
+    let _ = window.emit(
+        "workspace-mutated",
+        WorkspaceMutationEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            initiator: "local_user",
+            operation,
+            path,
+            destination,
+            before_revision,
+            after_revision,
+        },
+    );
+}
+
+fn workspace_recovery_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, WorkspaceError> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("workspace-recovery"))
+        .map_err(|_| WorkspaceError::RecoveryUnavailable)
 }
 
 fn project_snapshot(state: &tauri::State<'_, ProjectState>) -> Option<ActiveProject> {
@@ -352,14 +397,174 @@ fn workspace_read(
 }
 
 #[tauri::command]
-fn workspace_save(
-    request: SaveDocumentRequest,
+fn workspace_read_range(
+    request: ReadDocumentRangeRequest,
     state: tauri::State<'_, ProjectState>,
-) -> Result<DocumentSnapshot, WorkspaceError> {
+) -> Result<DocumentRangeSnapshot, WorkspaceError> {
     project_snapshot(&state)
         .ok_or(WorkspaceError::NoWorkspace)?
         .workspace
-        .save(request)
+        .read_range(request)
+}
+
+#[tauri::command]
+fn workspace_metadata(
+    path: String,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<WorkspaceMetadata, WorkspaceError> {
+    project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .metadata(&path)
+}
+
+#[tauri::command]
+fn workspace_search(
+    query: String,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<Vec<WorkspaceSearchMatch>, WorkspaceError> {
+    project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .search(&query)
+}
+
+#[tauri::command]
+fn workspace_save(
+    request: SaveDocumentRequest,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<DocumentSnapshot, WorkspaceError> {
+    let before_revision = request.expected_revision.clone();
+    let path = request.path.clone();
+    let snapshot = project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .save(request)?;
+    emit_workspace_mutation(
+        &window,
+        "save",
+        path,
+        None,
+        Some(before_revision),
+        Some(snapshot.revision.clone()),
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn workspace_create_document(
+    request: CreateDocumentRequest,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<DocumentSnapshot, WorkspaceError> {
+    let path = request.path.clone();
+    let snapshot = project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .create_document(request)?;
+    emit_workspace_mutation(
+        &window,
+        "create_file",
+        path,
+        None,
+        None,
+        Some(snapshot.revision.clone()),
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn workspace_create_directory(
+    path: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<WorkspaceEntry, WorkspaceError> {
+    let entry = project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .create_directory(&path)?;
+    emit_workspace_mutation(&window, "create_directory", path, None, None, None);
+    Ok(entry)
+}
+
+#[tauri::command]
+fn workspace_move(
+    request: MoveWorkspaceEntryRequest,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<WorkspaceEntry, WorkspaceError> {
+    let source = request.source.clone();
+    let destination = request.destination.clone();
+    let entry = project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .move_entry(request)?;
+    emit_workspace_mutation(&window, "move", source, Some(destination), None, None);
+    Ok(entry)
+}
+
+#[tauri::command]
+fn workspace_apply_patch(
+    request: ApplyDocumentPatchRequest,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<DocumentSnapshot, WorkspaceError> {
+    let path = request.path.clone();
+    let before_revision = request.expected_revision.clone();
+    let snapshot = project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .apply_patch(request)?;
+    emit_workspace_mutation(
+        &window,
+        "apply_patch",
+        path,
+        None,
+        Some(before_revision),
+        Some(snapshot.revision.clone()),
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn workspace_preview_patch(
+    request: ApplyDocumentPatchRequest,
+    state: tauri::State<'_, ProjectState>,
+) -> Result<DocumentPatchPreview, WorkspaceError> {
+    project_snapshot(&state)
+        .ok_or(WorkspaceError::NoWorkspace)?
+        .workspace
+        .preview_patch(&request)
+}
+
+#[tauri::command]
+fn workspace_delete(
+    request: DeleteWorkspaceEntryRequest,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+    recovery: tauri::State<'_, WorkspaceRecoveryService>,
+) -> Result<DeletedWorkspaceEntry, WorkspaceError> {
+    let project = project_snapshot(&state).ok_or(WorkspaceError::NoWorkspace)?;
+    let path = request.path.clone();
+    let before_revision = request.expected_revision.clone();
+    let deleted = recovery.delete(&project.workspace, &workspace_recovery_root(&app)?, request)?;
+    emit_workspace_mutation(&window, "delete", path, None, before_revision, None);
+    Ok(deleted)
+}
+
+#[tauri::command]
+fn workspace_restore(
+    recovery_token: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectState>,
+    recovery: tauri::State<'_, WorkspaceRecoveryService>,
+) -> Result<WorkspaceEntry, WorkspaceError> {
+    let project = project_snapshot(&state).ok_or(WorkspaceError::NoWorkspace)?;
+    let entry = recovery.restore(&project.workspace, &recovery_token)?;
+    emit_workspace_mutation(&window, "restore", entry.path.clone(), None, None, None);
+    Ok(entry)
 }
 
 #[tauri::command]
@@ -960,7 +1165,11 @@ pub fn run() {
         .manage(catalog_service)
         .manage(PluginLifecycleState::default())
         .manage(TerminalService::new())
+        .manage(WorkspaceRecoveryService::default())
         .setup(|app| {
+            if let Ok(root) = workspace_recovery_root(app.handle()) {
+                let _ = WorkspaceRecoveryService::cleanup_stale(&root);
+            }
             if let Ok(root) = plugin_storage_root(app.handle()) {
                 PluginRuntimeService::cleanup_stale_sessions(&root);
                 let _ = app.state::<PluginCatalogService>().load_cached(&root);
@@ -993,7 +1202,17 @@ pub fn run() {
             project_create_dialog,
             workspace_list,
             workspace_read,
+            workspace_read_range,
+            workspace_metadata,
+            workspace_search,
             workspace_save,
+            workspace_create_document,
+            workspace_create_directory,
+            workspace_move,
+            workspace_preview_patch,
+            workspace_apply_patch,
+            workspace_delete,
+            workspace_restore,
             git_status,
             git_stage,
             git_unstage,

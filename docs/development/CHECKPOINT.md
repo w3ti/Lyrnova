@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `89418f9`
-Estado: plataforma segura de plugins documentada para autores externos.
+Commit-base: `ca05c43`
+Estado: operações seguras de workspace do item #14 implementadas localmente.
 
 ## Direção consolidada
 
@@ -106,11 +106,27 @@ Estado: plataforma segura de plugins documentada para autores externos.
 - Configurações funcionais para fonte do editor, família tipográfica, tamanho das tabs,
   quebra de linha, espaços em branco, minimapa, ligaturas, rolagem suave, fonte do
   terminal e confirmação ao fechar arquivo modificado.
+- Aparência do aplicativo oferece tema do sistema, escuro, claro e alto contraste,
+  tamanho independente da fonte da interface, densidade compacta/confortável e
+  redução de movimento; o Monaco acompanha a paleta escolhida.
 - Configurações são persistidas localmente e aplicadas ao Monaco em tempo real.
 - Atalho `Ctrl+,`, entrada na paleta de comandos e botão de engrenagem adicionados.
-- Sugestões futuras exibidas para tema/acessibilidade, atalhos, salvamento/formatação,
+- Sugestões futuras exibidas para zoom por workspace, atalhos, salvamento/formatação,
   perfis do terminal, Git e privacidade dos plugins.
 - Tela vazia do editor mostra o ícone do Lyrnova quando todas as abas são fechadas.
+- `WorkspaceService` agora oferece metadados, leitura textual por faixa, busca limitada por nome/conteúdo,
+  criação exclusiva, movimentação sem substituição e patch textual com revisão,
+  ranges UTF-8, precondições exatas e preview sem escrita.
+- Paths relativos ambíguos ou não portáveis são recusados antes do efeito; entradas
+  existentes são canonicalizadas sob a raiz e symlinks são rejeitados.
+- Leitura, criação e salvamento textual recusam NUL/binários; arquivos grandes e
+  binários podem continuar sendo listados e administrados sem chegar ao editor.
+- Exclusão confirmada move a entrada para recuperação privada por token opaco e o
+  Explorer mantém uma pilha de ações que podem ser desfeitas durante a sessão.
+- Criação, mover/renomear, excluir, restaurar, atualizar e busca nativa foram ligados
+  ao Explorer; rascunhos sujos bloqueiam mutações que os afetariam.
+- Toda mutação emite evento atribuído a `local_user`, com UUID, operação, paths e
+  revisões quando aplicáveis. A ADR-0015 documenta contratos e risco TOCTOU residual.
 
 ## Validações já executadas em 2026-09-02
 
@@ -119,7 +135,7 @@ Estado: plataforma segura de plugins documentada para autores externos.
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace` (109 testes aprovados e 1 teste de integração
+- `cargo test --workspace` (123 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -150,10 +166,11 @@ dependências e não devem ser substituídas.
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
 2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-3. selecionar com o mantenedor o próximo item do roadmap.
+3. próximo item proposto: issue #15, “Implementar broker de processos, tasks,
+   sandbox e execução cancelável”.
 
 ## Estado do repositório
 
-O commit `89418f9` contém o protocolo externo, a resolução opcional de providers e
-os ADRs 0013 e 0014. Este checkpoint acrescenta o manual para autores de plugins;
-nenhum pacote OBS ou release foi realizado.
+O commit `ca05c43` contém o manual para autores de plugins. As operações seguras de
+workspace do item #14 estão no worktree e ainda não foram commitadas. Nenhum pacote
+OBS ou release foi realizado.
