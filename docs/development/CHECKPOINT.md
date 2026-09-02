@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `c0e16d2`
-Estado: base do item #15 publicada; integração tipada de Tasks local.
+Commit-base: `5ceddb8`
+Estado: item #15 publicado; item #16 em implementação local.
 
 ## Direção consolidada
 
@@ -148,6 +148,18 @@ Estado: base do item #15 publicada; integração tipada de Tasks local.
 - A interface ganhou área de Tasks, diagnóstico de sandbox, diálogo com comando,
   cwd, rede, acesso e risco, streaming limitado no dock e cancelamento explícito.
 - A ADR-0016 registra a integração concluída e os riscos residuais de cgroup/TOCTOU.
+- Approvals do agente e revisões de Tasks agora devolvem SHA-256 da ação tipada; o
+  frontend precisa repetir esse hash junto ao token, e alterações de comando, cwd,
+  arquivos, domínio, environment ou política falham fechadas.
+- Aprovações expiram em cinco minutos, são consumidas uma única vez e pendências são
+  negadas no encerramento da sessão, troca de workspace ou logout.
+- “Permitir na sessão” é uma regra local limitada à conversa e ao hash exato. O
+  provider recebe apenas aceite pontual; regras são visíveis e revogáveis nas
+  Configurações e sugestões externas de ampliação são ignoradas.
+- A interface diferencia risco elevado e crítico, usa ação visual destrutiva para
+  comandos perigosos, destaca dados redigidos e mostra validade, escopo e hash.
+- O histórico seguro em memória registra categoria, decisão, origem, horário e hash,
+  sem comandos, diffs ou valores de environment. A ADR-0017 documenta o contrato.
 
 ## Validações já executadas em 2026-09-02
 
@@ -156,7 +168,7 @@ Estado: base do item #15 publicada; integração tipada de Tasks local.
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace` (143 testes aprovados e 1 teste de integração
+- `cargo test --workspace` (152 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -187,11 +199,10 @@ dependências e não devem ser substituídas.
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
 2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-3. próximo item proposto: issue #16, “Criar fluxo claro de permissões e approvals
-   para plugins e tarefas”.
+3. concluir a validação e revisão do item #16 antes de selecionar o próximo issue.
 
 ## Estado do repositório
 
-O commit `c0e16d2` contém a base segura do broker de processos. A integração do item
-#15 com Tasks, grants e revisão na interface está no worktree, ainda sem commit.
-Nenhum pacote OBS ou release foi realizado.
+O commit `5ceddb8` contém o item #15 completo, incluindo Tasks, grants e revisão na
+interface. O item #16 está no worktree, ainda sem commit. Nenhum pacote OBS ou
+release foi realizado.

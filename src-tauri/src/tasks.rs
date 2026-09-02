@@ -95,6 +95,7 @@ impl From<ProcessBrokerError> for TaskError {
 struct PendingTask {
     plugin_id: String,
     process_id: String,
+    action_sha256: String,
     permissions: BTreeSet<PluginPermission>,
 }
 
@@ -164,6 +165,7 @@ impl TaskBroker {
             PendingTask {
                 plugin_id: provider.id.clone(),
                 process_id: process.process_id.clone(),
+                action_sha256: process.action_sha256.clone(),
                 permissions: provider.permissions.clone(),
             },
         );
@@ -192,15 +194,24 @@ impl TaskBroker {
     pub fn execute(
         &self,
         review_token: &str,
+        action_sha256: &str,
         current_permissions: &BTreeSet<PluginPermission>,
         emit: Arc<dyn Fn(ProcessOutputEvent) + Send + Sync>,
     ) -> Result<(ProcessResult, Vec<ProcessAuditEvent>), TaskError> {
-        let pending = self
+        let mut pending_tasks = self
             .pending
             .lock()
-            .map_err(|_| TaskError::StateUnavailable)?
+            .map_err(|_| TaskError::StateUnavailable)?;
+        let reviewed = pending_tasks
+            .get(review_token)
+            .ok_or(TaskError::ReviewNotFound)?;
+        if reviewed.action_sha256 != action_sha256 {
+            return Err(TaskError::Process(ProcessBrokerError::ApprovalMismatch));
+        }
+        let pending = pending_tasks
             .remove(review_token)
             .ok_or(TaskError::ReviewNotFound)?;
+        drop(pending_tasks);
         if &pending.permissions != current_permissions {
             let _ = self.process.discard_review(review_token);
             return Err(TaskError::AuthorizationChanged);
@@ -211,7 +222,7 @@ impl TaskBroker {
             .insert(pending.process_id.clone(), pending.plugin_id);
         let result = self
             .process
-            .execute(review_token, emit)
+            .execute(review_token, action_sha256, emit)
             .map_err(TaskError::from);
         self.running
             .lock()
@@ -493,7 +504,12 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(
-            broker.execute(&review.process.review_token, &changed, Arc::new(|_| {})),
+            broker.execute(
+                &review.process.review_token,
+                &review.process.action_sha256,
+                &changed,
+                Arc::new(|_| {})
+            ),
             Err(TaskError::AuthorizationChanged)
         );
     }
@@ -515,7 +531,13 @@ mod tests {
             )
             .unwrap();
         let token = review.process.review_token;
-        let result = broker.execute(&token, &provider.permissions, Arc::new(|_| {}));
+        let action_sha256 = review.process.action_sha256;
+        let result = broker.execute(
+            &token,
+            &action_sha256,
+            &provider.permissions,
+            Arc::new(|_| {}),
+        );
         if review.process.sandbox == crate::process_broker::SandboxStrength::Strong {
             assert_eq!(result.unwrap().0.exit_code, Some(0));
         } else {
@@ -525,8 +547,45 @@ mod tests {
             );
         }
         assert_eq!(
-            broker.execute(&token, &provider.permissions, Arc::new(|_| {})),
+            broker.execute(
+                &token,
+                &action_sha256,
+                &provider.permissions,
+                Arc::new(|_| {})
+            ),
             Err(TaskError::ReviewNotFound)
+        );
+    }
+
+    #[test]
+    fn changed_action_hash_is_rejected_without_consuming_the_task_review() {
+        let workspace = TestWorkspace::new();
+        let broker = TaskBroker::default();
+        let provider = provider(&[
+            PluginPermission::ProcessSpawn,
+            PluginPermission::WorkspaceRead,
+        ]);
+        let (review, _) = broker
+            .review(
+                &workspace.0,
+                &provider,
+                "check",
+                catalog(request(ProcessAccess::ReadOnly, false)),
+            )
+            .unwrap();
+        assert_eq!(
+            broker.execute(
+                &review.process.review_token,
+                "changed-action",
+                &provider.permissions,
+                Arc::new(|_| {})
+            ),
+            Err(TaskError::Process(ProcessBrokerError::ApprovalMismatch))
+        );
+        assert!(
+            broker
+                .pending_plugin_id(&review.process.review_token)
+                .is_ok()
         );
     }
 }

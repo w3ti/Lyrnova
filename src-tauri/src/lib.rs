@@ -310,6 +310,7 @@ fn project_open_dialog(
         .runtimes
         .stop_all()
         .map_err(|_| WorkspaceError::Io)?;
+    app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
     *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
@@ -408,6 +409,7 @@ fn project_create_dialog(
         .runtimes
         .stop_all()
         .map_err(|_| WorkspaceError::Io)?;
+    app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
     *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
@@ -1132,6 +1134,7 @@ fn task_review(
 #[tauri::command]
 async fn task_execute(
     review_token: String,
+    action_sha256: String,
     window: tauri::WebviewWindow,
     registry: tauri::State<'_, PluginRegistry>,
     plugins: tauri::State<'_, PluginLifecycleState>,
@@ -1150,7 +1153,8 @@ async fn task_execute(
         let emit: Arc<dyn Fn(ProcessOutputEvent) + Send + Sync> = Arc::new(move |event| {
             let _ = output_window.emit("task-output", event);
         });
-        let (result, audits) = task_broker.execute(&review_token, &provider.permissions, emit)?;
+        let (result, audits) =
+            task_broker.execute(&review_token, &action_sha256, &provider.permissions, emit)?;
         for audit in audits {
             let _ = window.emit("process-audit", audit);
         }
@@ -1199,6 +1203,7 @@ async fn agent_account_read(
 async fn agent_logout(
     state: tauri::State<'_, ProjectState>,
     plugins: tauri::State<'_, PluginRegistry>,
+    approvals: tauri::State<'_, ApprovalBroker>,
 ) -> Result<AgentConnectionStatus, AgentRuntimeError> {
     resolve_ai_provider(
         plugins.inner(),
@@ -1209,9 +1214,13 @@ async fn agent_logout(
         ],
     )?;
     let root = agent_runtime_root(&state);
-    tauri::async_runtime::spawn_blocking(move || app_server::logout(&root))
+    let result = tauri::async_runtime::spawn_blocking(move || app_server::logout(&root))
         .await
-        .map_err(|_| AgentRuntimeError::ProcessFailed)?
+        .map_err(|_| AgentRuntimeError::ProcessFailed)?;
+    if result.is_ok() {
+        approvals.clear_session();
+    }
+    result
 }
 
 #[tauri::command]
@@ -1263,6 +1272,21 @@ fn agent_approval_resolve(
         &[PluginPermission::RequestApproval],
     )?;
     approvals.resolve(request)
+}
+
+#[tauri::command]
+fn agent_approval_state(
+    approvals: tauri::State<'_, ApprovalBroker>,
+) -> Result<app_server::AgentApprovalState, AgentRuntimeError> {
+    approvals.snapshot()
+}
+
+#[tauri::command]
+fn agent_approval_session_revoke(
+    rule_id: String,
+    approvals: tauri::State<'_, ApprovalBroker>,
+) -> Result<(), AgentRuntimeError> {
+    approvals.revoke_session_rule(&rule_id)
 }
 
 #[tauri::command]
@@ -1404,6 +1428,8 @@ pub fn run() {
             agent_logout,
             agent_turn_start,
             agent_approval_resolve,
+            agent_approval_state,
+            agent_approval_session_revoke,
             agent_login_start
         ])
         .run(tauri::generate_context!())

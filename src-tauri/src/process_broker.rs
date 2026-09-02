@@ -135,11 +135,14 @@ pub enum SandboxStrength {
 pub struct ProcessReview {
     pub review_token: String,
     pub process_id: String,
+    pub action_sha256: String,
     pub origin: String,
     pub command: String,
     pub cwd: String,
     pub access: ProcessAccess,
     pub network: bool,
+    pub environment_keys: Vec<String>,
+    pub timeout_ms: u64,
     pub risk: ProcessRisk,
     pub sandbox: SandboxStrength,
     pub expires_in_ms: u64,
@@ -211,6 +214,7 @@ pub enum ProcessBrokerError {
     PermissionDenied,
     ReviewNotFound,
     ReviewExpired,
+    ApprovalMismatch,
     SandboxUnavailable,
     UnsupportedPlatform,
     SpawnFailed,
@@ -238,6 +242,7 @@ struct ProcessPlan {
     program: PreparedProgram,
     command_display: String,
     command_sha256: String,
+    action_sha256: String,
     risk: ProcessRisk,
     sandbox: SandboxStrength,
 }
@@ -278,11 +283,14 @@ impl ProcessBroker {
         let review = ProcessReview {
             review_token: review_token.clone(),
             process_id: plan.process_id.clone(),
+            action_sha256: plan.action_sha256.clone(),
             origin: plan.origin.clone(),
             command: plan.command_display.clone(),
             cwd: relative_display(&plan.workspace, &plan.cwd),
             access: plan.request.access,
             network: plan.request.network,
+            environment_keys: plan.request.environment.keys().cloned().collect(),
+            timeout_ms: plan.request.timeout_ms,
             risk: plan.risk,
             sandbox: plan.sandbox,
             expires_in_ms: REVIEW_TTL.as_millis() as u64,
@@ -306,14 +314,23 @@ impl ProcessBroker {
     pub fn execute(
         &self,
         review_token: &str,
+        action_sha256: &str,
         emit: Arc<dyn Fn(ProcessOutputEvent) + Send + Sync>,
     ) -> Result<(ProcessResult, Vec<ProcessAuditEvent>), ProcessBrokerError> {
-        let pending = self
+        let mut reviews = self
             .pending
             .lock()
-            .map_err(|_| ProcessBrokerError::StateUnavailable)?
+            .map_err(|_| ProcessBrokerError::StateUnavailable)?;
+        let reviewed = reviews
+            .get(review_token)
+            .ok_or(ProcessBrokerError::ReviewNotFound)?;
+        if reviewed.plan.action_sha256 != action_sha256 {
+            return Err(ProcessBrokerError::ApprovalMismatch);
+        }
+        let pending = reviews
             .remove(review_token)
             .ok_or(ProcessBrokerError::ReviewNotFound)?;
+        drop(reviews);
         if pending.expires_at <= Instant::now() {
             return Err(ProcessBrokerError::ReviewExpired);
         }
@@ -466,6 +483,22 @@ fn prepare_plan(
     };
     let origin = origin.label()?;
     let command_sha256 = format!("{:x}", Sha256::digest(command_display.as_bytes()));
+    let cwd_display = relative_display(&workspace, &cwd);
+    let approval_action = serde_json::json!({
+        "version": 1,
+        "origin": origin,
+        "command": command_display,
+        "cwd": cwd_display,
+        "access": request.access,
+        "network": request.network,
+        "environment": request.environment,
+        "timeoutMs": request.timeout_ms,
+        "risk": risk,
+        "sandbox": sandbox,
+    });
+    let approval_bytes =
+        serde_json::to_vec(&approval_action).map_err(|_| ProcessBrokerError::InvalidRequest)?;
+    let action_sha256 = format!("{:x}", Sha256::digest(approval_bytes));
     Ok(ProcessPlan {
         process_id: uuid::Uuid::new_v4().simple().to_string(),
         origin,
@@ -476,6 +509,7 @@ fn prepare_plan(
         program,
         command_display,
         command_sha256,
+        action_sha256,
         risk,
         sandbox,
     })
@@ -1253,7 +1287,11 @@ mod tests {
             )
             .unwrap();
         let (result, _) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
         let environment: BTreeMap<_, _> = result
             .stdout
@@ -1340,13 +1378,21 @@ mod tests {
 
         if review.sandbox == SandboxStrength::Unavailable {
             assert_eq!(
-                broker.execute(&review.review_token, Arc::new(|_| {})),
+                broker.execute(
+                    &review.review_token,
+                    &review.action_sha256,
+                    Arc::new(|_| {})
+                ),
                 Err(ProcessBrokerError::SandboxUnavailable)
             );
             assert!(!workspace.0.join("must-not-exist").exists());
         } else {
             let (result, _) = broker
-                .execute(&review.review_token, Arc::new(|_| {}))
+                .execute(
+                    &review.review_token,
+                    &review.action_sha256,
+                    Arc::new(|_| {}),
+                )
                 .unwrap();
             assert_eq!(result.outcome, ProcessOutcome::Exited);
             assert_ne!(result.exit_code, Some(0));
@@ -1385,7 +1431,11 @@ mod tests {
             )
             .unwrap();
         let (result, _) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
 
         assert_eq!(
@@ -1418,7 +1468,11 @@ mod tests {
             )
             .unwrap();
         let (result, audit) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
 
         assert_eq!(result.outcome, ProcessOutcome::Exited);
@@ -1451,7 +1505,11 @@ mod tests {
             )
             .unwrap();
         let (result, _) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
 
         assert_eq!(result.stdout.trim(), MAX_PROCESSES_PER_USER.to_string());
@@ -1479,7 +1537,11 @@ mod tests {
             )
             .unwrap();
         let (result, _) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
 
         assert_eq!(result.outcome, ProcessOutcome::Exited);
@@ -1511,7 +1573,11 @@ mod tests {
             .unwrap();
         let started = Instant::now();
         let (result, _) = broker
-            .execute(&review.review_token, Arc::new(|_| {}))
+            .execute(
+                &review.review_token,
+                &review.action_sha256,
+                Arc::new(|_| {}),
+            )
             .unwrap();
 
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
@@ -1544,9 +1610,11 @@ mod tests {
             .unwrap();
         let process_id = review.process_id.clone();
         let token = review.review_token;
+        let action_sha256 = review.action_sha256;
         let execution_broker = Arc::clone(&broker);
-        let execution =
-            std::thread::spawn(move || execution_broker.execute(&token, Arc::new(|_| {})));
+        let execution = std::thread::spawn(move || {
+            execution_broker.execute(&token, &action_sha256, Arc::new(|_| {}))
+        });
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline

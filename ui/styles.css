@@ -268,6 +268,8 @@ body.resizing-panels iframe { pointer-events: none; }
 .approval-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: rgb(229 188 96 / 13%); color: var(--yellow); }
 .approval-heading h2 { margin: 0; font-size: .92rem; }
 .risk-badge { padding: 4px 7px; border-radius: 999px; background: rgb(111 210 165 / 12%); color: var(--green); font-size: .62rem; }
+.risk-badge[data-risk="elevated"] { background: rgb(229 188 96 / 12%); color: var(--yellow); }
+.risk-badge[data-risk="critical"] { background: rgb(236 122 137 / 13%); color: #f1a1ac; }
 .command-preview { display: block; margin: 14px 0; padding: 11px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); color: var(--code-text); font: .74rem/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
 .command-preview span { color: var(--cyan); }
 .approval-details { display: grid; grid-template-columns: 1fr; gap: 7px; margin: 0; }
@@ -345,6 +347,17 @@ body.resizing-panels iframe { pointer-events: none; }
 .setting-stepper button:hover { background: var(--surface-hover); color: var(--text); }
 .setting-stepper output { color: var(--text); font: .66rem ui-monospace, monospace; text-align: center; }
 .plugin-section-heading { grid-template-columns: 36px minmax(0, 1fr) auto; }
+.approval-settings-block + .approval-settings-block { border-top: 1px solid var(--border); }
+.approval-settings-heading { padding: 13px 19px 9px; }
+.approval-settings-heading h3 { margin: 0; font-size: .74rem; }
+.approval-settings-heading p { margin: 4px 0 0; color: var(--subtle); font-size: .6rem; line-height: 1.45; }
+.approval-settings-list { display: grid; gap: 7px; padding: 5px 14px 14px; }
+.approval-state-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
+.approval-state-row > div { display: grid; gap: 3px; min-width: 0; }
+.approval-state-row strong { font-size: .68rem; }
+.approval-state-row p { margin: 0; color: var(--muted); font-size: .61rem; line-height: 1.4; }
+.approval-state-row code { overflow: hidden; color: var(--subtle); font: .55rem ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.approval-audit-row { grid-template-columns: minmax(0, 1fr); }
 .plugin-install-guide { display: flex; align-items: flex-start; gap: 9px; padding: 12px 19px; border-bottom: 1px solid var(--border); background: rgb(107 205 231 / 5%); color: var(--muted); }
 .plugin-install-guide > span { display: grid; flex: 0 0 auto; place-items: center; width: 18px; height: 18px; border: 1px solid rgb(107 205 231 / 28%); border-radius: 50%; color: var(--cyan); font: 750 .58rem ui-monospace, monospace; }
 .plugin-install-guide p { margin: 1px 0 0; font-size: .63rem; line-height: 1.5; }

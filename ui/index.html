@@ -96,6 +96,7 @@
             <button type="button" data-settings-target="settings-terminal"><span>⌘</span><span><strong>Terminal</strong><small>Aparência do terminal integrado</small></span></button>
             <button type="button" data-settings-target="settings-files"><span>▱</span><span><strong>Arquivos</strong><small>Proteção de alterações locais</small></span></button>
             <button type="button" data-settings-target="settings-plugins"><span>◇</span><span><strong>Plugins</strong><small>Instalação, permissões e estado</small></span></button>
+            <button type="button" data-settings-target="settings-approvals"><span>✓</span><span><strong>Aprovações</strong><small>Regras da sessão e histórico seguro</small></span></button>
             <button type="button" data-settings-target="settings-planned"><span>＋</span><span><strong>Planejadas</strong><small>Próximas opções do IDE</small></span></button>
           </nav>
           <p class="settings-sidebar-note">As preferências são locais e entram em vigor imediatamente.</p>
@@ -182,6 +183,18 @@
                 <div class="plugin-list" id="plugin-list" aria-live="polite"><p class="plugin-list-empty">Carregando catálogo local…</p></div>
                 <div class="trusted-plugin-heading"><div><h3>Catálogo curado</h3><p>Metadados assinados, publishers autenticados e pacotes verificados por SHA-256.</p></div><button class="secondary-button" type="button" data-action="update-plugin-catalog">Atualizar catálogo</button></div>
                 <div class="plugin-list trusted-plugin-list" id="trusted-plugin-list" aria-live="polite"><p class="plugin-list-empty">Carregando catálogo curado…</p></div>
+              </section>
+
+              <section class="settings-section" id="settings-approvals" aria-labelledby="settings-approvals-title">
+                <div class="settings-section-heading"><span class="settings-section-icon">✓</span><div><h2 id="settings-approvals-title">Aprovações</h2><p>Autoridade temporária e decisões recentes, sem comandos, diffs ou segredos.</p></div></div>
+                <div class="approval-settings-block">
+                  <div class="approval-settings-heading"><div><h3>Regras desta sessão</h3><p>Somente ações exatamente iguais ao hash aprovado podem reutilizar uma regra.</p></div></div>
+                  <div class="approval-settings-list" id="approval-session-rules" aria-live="polite"><p class="plugin-list-empty">Nenhuma regra ativa.</p></div>
+                </div>
+                <div class="approval-settings-block">
+                  <div class="approval-settings-heading"><div><h3>Histórico seguro</h3><p>Registra decisões e fases de processo por origem e hash; conteúdo sensível não é armazenado.</p></div></div>
+                  <div class="approval-settings-list" id="approval-audit-list" aria-live="polite"><p class="plugin-list-empty">Nenhuma decisão nesta sessão.</p></div>
+                </div>
               </section>
 
               <section class="settings-section planned-settings" id="settings-planned" aria-labelledby="settings-planned-title">

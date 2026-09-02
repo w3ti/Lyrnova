@@ -204,15 +204,32 @@ fn task_execution_requires_typed_review_and_never_accepts_frontend_authority() {
     assert!(html.contains("id=\"task-review-dialog\""));
     assert!(html.contains("id=\"task-review-command\""));
     assert!(javascript.contains("invoke(\"task_review\", { pluginId, taskId })"));
-    assert!(
-        javascript
-            .contains("invoke(\"task_execute\", { reviewToken: review.process.reviewToken })")
-    );
+    assert!(javascript.contains("reviewToken: review.process.reviewToken"));
+    assert!(javascript.contains("actionSha256: review.process.actionSha256"));
     assert!(javascript.contains("invoke(\"task_cancel\", { processId:"));
     assert!(!javascript.contains("processAuthority"));
     assert!(!javascript.contains("task_execute\", { command"));
     assert!(rust.contains("registry.task_provider(&plugin_id)"));
     assert!(rust.contains("plugins.tasks.pending_plugin_id(&review_token)"));
+}
+
+#[test]
+fn approvals_are_hash_bound_revocable_and_audited_without_action_content() {
+    let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
+        .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
+    let rust = fs::read_to_string(manifest_dir().join("src/app_server.rs"))
+        .expect("approval broker must be readable");
+
+    assert!(html.contains("id=\"settings-approvals\""));
+    assert!(html.contains("id=\"approval-session-rules\""));
+    assert!(javascript.contains("actionSha256: card.dataset.actionSha256"));
+    assert!(javascript.contains("agent_approval_session_revoke"));
+    assert!(rust.contains("APPROVAL_TTL"));
+    assert!(rust.contains("approval.action_sha256 != resolution.action_sha256"));
+    assert!(rust.contains("AgentApprovalSource::SessionRule"));
+    assert!(rust.contains("pub fn revoke_session_rule"));
 }
 
 #[test]

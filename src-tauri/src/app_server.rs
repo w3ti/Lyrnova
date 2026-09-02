@@ -1,13 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::backend::{
@@ -23,6 +25,9 @@ pub struct AgentConnectionStatus {
 }
 
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
+const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_APPROVAL_AUDIT_EVENTS: usize = 100;
+const MAX_SESSION_APPROVALS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,12 +65,13 @@ impl AgentApprovalDecision {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentApprovalResolution {
     pub approval_id: String,
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    pub action_sha256: String,
     pub decision: AgentApprovalDecision,
 }
 
@@ -78,6 +84,13 @@ pub enum AgentApprovalKind {
     WriteStdin,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentApprovalRisk {
+    Elevated,
+    Critical,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentFileChange {
@@ -86,16 +99,97 @@ pub struct AgentFileChange {
     pub diff: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalRequest {
+    pub approval_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub action_sha256: String,
+    pub kind: AgentApprovalKind,
+    pub risk: AgentApprovalRisk,
+    pub reason: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub files: Vec<AgentFileChange>,
+    pub network_host: Option<String>,
+    pub network_protocol: Option<String>,
+    pub environment_id: Option<String>,
+    pub broader_policy_ignored: bool,
+    pub expires_in_ms: u64,
+    pub session_scope: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalSessionRule {
+    pub rule_id: String,
+    pub action_sha256: String,
+    pub kind: AgentApprovalKind,
+    pub scope: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentApprovalSource {
+    User,
+    SessionRule,
+    Timeout,
+    Lifecycle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalAuditEvent {
+    pub event_id: String,
+    pub action_sha256: String,
+    pub kind: AgentApprovalKind,
+    pub decision: AgentApprovalDecision,
+    pub source: AgentApprovalSource,
+    pub decided_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalState {
+    pub session_rules: Vec<AgentApprovalSessionRule>,
+    pub audit: Vec<AgentApprovalAuditEvent>,
+}
+
 struct PendingApproval {
     thread_id: String,
     turn_id: String,
     item_id: String,
+    action_sha256: String,
+    kind: AgentApprovalKind,
+    scope: String,
+    expires_at: Instant,
     sender: mpsc::Sender<AgentApprovalDecision>,
+}
+
+#[derive(Default)]
+struct ApprovalState {
+    pending: HashMap<String, PendingApproval>,
+    session_rules: HashMap<String, AgentApprovalSessionRule>,
+    audit: VecDeque<AgentApprovalAuditEvent>,
+}
+
+enum ApprovalRegistration {
+    Pending {
+        approval_id: String,
+        receiver: mpsc::Receiver<AgentApprovalDecision>,
+    },
+    SessionAccepted {
+        approval_id: String,
+        rule_id: String,
+    },
 }
 
 #[derive(Clone, Default)]
 pub struct ApprovalBroker {
-    pending: Arc<Mutex<HashMap<String, PendingApproval>>>,
+    state: Arc<Mutex<ApprovalState>>,
 }
 
 impl ApprovalBroker {
@@ -104,50 +198,218 @@ impl ApprovalBroker {
         thread_id: &str,
         turn_id: &str,
         item_id: &str,
-    ) -> Result<(String, mpsc::Receiver<AgentApprovalDecision>), AgentRuntimeError> {
+        action_sha256: &str,
+        kind: AgentApprovalKind,
+        scope: &str,
+    ) -> Result<ApprovalRegistration, AgentRuntimeError> {
         let approval_id = Uuid::new_v4().to_string();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::ProcessFailed)?;
+        let session_key = format!("{thread_id}:{action_sha256}");
+        if let Some(rule) = state.session_rules.get(&session_key).cloned() {
+            push_approval_audit(
+                &mut state,
+                action_sha256,
+                kind,
+                AgentApprovalDecision::Accept,
+                AgentApprovalSource::SessionRule,
+            );
+            return Ok(ApprovalRegistration::SessionAccepted {
+                approval_id,
+                rule_id: rule.rule_id,
+            });
+        }
         let (sender, receiver) = mpsc::channel();
         let pending = PendingApproval {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
             item_id: item_id.to_owned(),
+            action_sha256: action_sha256.to_owned(),
+            kind,
+            scope: scope.to_owned(),
+            expires_at: Instant::now() + APPROVAL_TTL,
             sender,
         };
-        self.pending
-            .lock()
-            .map_err(|_| AgentRuntimeError::ProcessFailed)?
-            .insert(approval_id.clone(), pending);
-        Ok((approval_id, receiver))
+        state.pending.insert(approval_id.clone(), pending);
+        Ok(ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        })
     }
 
     pub fn resolve(&self, resolution: AgentApprovalResolution) -> Result<(), AgentRuntimeError> {
-        let mut pending = self
-            .pending
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| AgentRuntimeError::ProcessFailed)?;
-        let approval = pending
+        let approval = state
+            .pending
             .get(&resolution.approval_id)
             .ok_or(AgentRuntimeError::ApprovalNotFound)?;
         if approval.thread_id != resolution.thread_id
             || approval.turn_id != resolution.turn_id
             || approval.item_id != resolution.item_id
+            || approval.action_sha256 != resolution.action_sha256
         {
             return Err(AgentRuntimeError::ApprovalMismatch);
         }
-        let approval = pending
+        if approval.expires_at <= Instant::now() {
+            let approval = state
+                .pending
+                .remove(&resolution.approval_id)
+                .ok_or(AgentRuntimeError::ApprovalNotFound)?;
+            push_approval_audit(
+                &mut state,
+                &approval.action_sha256,
+                approval.kind,
+                AgentApprovalDecision::Decline,
+                AgentApprovalSource::Timeout,
+            );
+            let _ = approval.sender.send(AgentApprovalDecision::Decline);
+            return Err(AgentRuntimeError::ApprovalExpired);
+        }
+        let approval = state
+            .pending
             .remove(&resolution.approval_id)
             .ok_or(AgentRuntimeError::ApprovalNotFound)?;
         approval
             .sender
             .send(resolution.decision)
-            .map_err(|_| AgentRuntimeError::TransportClosed)
+            .map_err(|_| AgentRuntimeError::TransportClosed)?;
+        if resolution.decision == AgentApprovalDecision::AcceptForSession {
+            if state.session_rules.len() >= MAX_SESSION_APPROVALS {
+                let oldest = state
+                    .session_rules
+                    .iter()
+                    .min_by_key(|(_, rule)| rule.created_at_ms)
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    state.session_rules.remove(&oldest);
+                }
+            }
+            state.session_rules.insert(
+                format!("{}:{}", approval.thread_id, approval.action_sha256),
+                AgentApprovalSessionRule {
+                    rule_id: Uuid::new_v4().to_string(),
+                    action_sha256: approval.action_sha256.clone(),
+                    kind: approval.kind,
+                    scope: approval.scope.clone(),
+                    created_at_ms: unix_time_ms(),
+                },
+            );
+        }
+        push_approval_audit(
+            &mut state,
+            &approval.action_sha256,
+            approval.kind,
+            resolution.decision,
+            AgentApprovalSource::User,
+        );
+        Ok(())
     }
 
     fn discard(&self, approval_id: &str) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(approval_id);
+        if let Ok(mut state) = self.state.lock() {
+            state.pending.remove(approval_id);
         }
     }
+
+    fn expire(&self, approval_id: &str) -> Result<(), AgentRuntimeError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::ProcessFailed)?;
+        if let Some(approval) = state.pending.remove(approval_id) {
+            push_approval_audit(
+                &mut state,
+                &approval.action_sha256,
+                approval.kind,
+                AgentApprovalDecision::Decline,
+                AgentApprovalSource::Timeout,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<AgentApprovalState, AgentRuntimeError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::ProcessFailed)?;
+        let mut session_rules: Vec<_> = state.session_rules.values().cloned().collect();
+        session_rules.sort_by_key(|rule| std::cmp::Reverse(rule.created_at_ms));
+        Ok(AgentApprovalState {
+            session_rules,
+            audit: state.audit.iter().rev().cloned().collect(),
+        })
+    }
+
+    pub fn revoke_session_rule(&self, rule_id: &str) -> Result<(), AgentRuntimeError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::ProcessFailed)?;
+        let action_sha256 = state
+            .session_rules
+            .iter()
+            .find(|(_, rule)| rule.rule_id == rule_id)
+            .map(|(key, _)| key.clone())
+            .ok_or(AgentRuntimeError::ApprovalRuleNotFound)?;
+        state.session_rules.remove(&action_sha256);
+        Ok(())
+    }
+
+    pub fn clear_session(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.session_rules.clear();
+            let pending: Vec<_> = state
+                .pending
+                .drain()
+                .map(|(_, approval)| approval)
+                .collect();
+            for approval in pending {
+                push_approval_audit(
+                    &mut state,
+                    &approval.action_sha256,
+                    approval.kind,
+                    AgentApprovalDecision::Decline,
+                    AgentApprovalSource::Lifecycle,
+                );
+                let _ = approval.sender.send(AgentApprovalDecision::Decline);
+            }
+        }
+    }
+}
+
+fn push_approval_audit(
+    state: &mut ApprovalState,
+    action_sha256: &str,
+    kind: AgentApprovalKind,
+    decision: AgentApprovalDecision,
+    source: AgentApprovalSource,
+) {
+    if state.audit.len() >= MAX_APPROVAL_AUDIT_EVENTS {
+        state.audit.pop_front();
+    }
+    state.audit.push_back(AgentApprovalAuditEvent {
+        event_id: Uuid::new_v4().to_string(),
+        action_sha256: action_sha256.to_owned(),
+        kind,
+        decision,
+        source,
+        decided_at_ms: unix_time_ms(),
+    });
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -198,21 +460,19 @@ pub enum AgentStreamEvent {
         delta: String,
     },
     ApprovalRequested {
-        approval_id: String,
-        thread_id: String,
-        turn_id: String,
-        item_id: String,
-        kind: AgentApprovalKind,
-        reason: Option<String>,
-        command: Option<String>,
-        cwd: Option<String>,
-        files: Vec<AgentFileChange>,
-        network_host: Option<String>,
-        network_protocol: Option<String>,
+        #[serde(flatten)]
+        request: Box<AgentApprovalRequest>,
     },
     ApprovalResolved {
         approval_id: String,
         decision: AgentApprovalDecision,
+        expired: bool,
+    },
+    ApprovalSessionApplied {
+        approval_id: String,
+        action_sha256: String,
+        kind: AgentApprovalKind,
+        rule_id: String,
     },
     TurnCompleted {
         thread_id: String,
@@ -239,6 +499,8 @@ pub enum AgentRuntimeError {
     ApprovalRequired,
     ApprovalNotFound,
     ApprovalMismatch,
+    ApprovalExpired,
+    ApprovalRuleNotFound,
     PluginDisabled,
     PluginPermissionDenied,
     LoginInProgress,
@@ -626,23 +888,23 @@ fn item_preview(params: &Value) -> Result<Option<(String, ItemPreview)>, AgentRu
         Some("commandExecution") => Ok(Some((
             item_id,
             ItemPreview {
-                command: optional_limited_string(item.get("command"), 16 * 1024),
-                cwd: optional_limited_string(item.get("cwd"), 4 * 1024),
+                command: optional_action_string(item.get("command"), 64 * 1024)?,
+                cwd: optional_action_string(item.get("cwd"), 4 * 1024)?,
                 files: Vec::new(),
             },
         ))),
         Some("fileChange") => {
-            let files = item
+            let changes = item
                 .get("changes")
                 .and_then(Value::as_array)
-                .map(|changes| {
-                    changes
-                        .iter()
-                        .take(200)
-                        .filter_map(file_change_preview)
-                        .collect()
-                })
-                .unwrap_or_default();
+                .ok_or(AgentRuntimeError::InvalidProtocol)?;
+            if changes.is_empty() || changes.len() > 200 {
+                return Err(AgentRuntimeError::InvalidProtocol);
+            }
+            let files = changes
+                .iter()
+                .map(file_change_preview)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(Some((
                 item_id,
                 ItemPreview {
@@ -657,11 +919,12 @@ fn item_preview(params: &Value) -> Result<Option<(String, ItemPreview)>, AgentRu
     }
 }
 
-fn file_change_preview(value: &Value) -> Option<AgentFileChange> {
-    Some(AgentFileChange {
-        path: optional_limited_string(value.get("path"), 4 * 1024)?,
-        kind: optional_limited_string(value.get("kind"), 128).unwrap_or_else(|| "update".into()),
-        diff: optional_limited_string(value.get("diff"), 64 * 1024).unwrap_or_default(),
+fn file_change_preview(value: &Value) -> Result<AgentFileChange, AgentRuntimeError> {
+    Ok(AgentFileChange {
+        path: optional_action_string(value.get("path"), 4 * 1024)?
+            .ok_or(AgentRuntimeError::InvalidProtocol)?,
+        kind: optional_action_string(value.get("kind"), 128)?.unwrap_or_else(|| "update".into()),
+        diff: optional_action_string(value.get("diff"), 256 * 1024)?.unwrap_or_default(),
     })
 }
 
@@ -681,6 +944,106 @@ fn optional_limited_string(value: Option<&Value>, max_bytes: usize) -> Option<St
     Some(limited)
 }
 
+fn optional_action_string(
+    value: Option<&Value>,
+    max_bytes: usize,
+) -> Result<Option<String>, AgentRuntimeError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value.as_str().ok_or(AgentRuntimeError::InvalidProtocol)?;
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    if value.len() > max_bytes || value.contains('\0') {
+        return Err(AgentRuntimeError::InvalidProtocol);
+    }
+    Ok(Some(value.to_owned()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn approval_action_sha256(
+    kind: AgentApprovalKind,
+    reason: &Option<String>,
+    command: &Option<String>,
+    cwd: &Option<String>,
+    files: &[AgentFileChange],
+    network_host: &Option<String>,
+    network_protocol: &Option<String>,
+    environment_id: &Option<String>,
+) -> Result<String, AgentRuntimeError> {
+    let action = serde_json::json!({
+        "version": 1,
+        "kind": kind,
+        "reason": reason,
+        "command": command,
+        "cwd": cwd,
+        "files": files,
+        "networkHost": network_host,
+        "networkProtocol": network_protocol,
+        "environmentId": environment_id,
+    });
+    let bytes = serde_json::to_vec(&action).map_err(|_| AgentRuntimeError::InvalidProtocol)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn approval_risk(
+    kind: AgentApprovalKind,
+    command: Option<&str>,
+    files: &[AgentFileChange],
+) -> AgentApprovalRisk {
+    const CRITICAL_COMMAND_MARKERS: &[&str] = &[
+        "rm -rf",
+        "git clean",
+        "git reset --hard",
+        "git push --force",
+        "git push -f",
+        "git checkout --",
+        "git restore ",
+        "git branch -d",
+        "mkfs",
+        "shutdown",
+        "reboot",
+    ];
+    let destructive_command = kind == AgentApprovalKind::Command
+        && command.is_some_and(|command| {
+            let command = command.to_ascii_lowercase();
+            CRITICAL_COMMAND_MARKERS
+                .iter()
+                .any(|marker| command.contains(marker))
+        });
+    let destructive_file_change = kind == AgentApprovalKind::FileChange
+        && files.iter().any(|file| {
+            matches!(
+                file.kind.to_ascii_lowercase().as_str(),
+                "delete" | "remove" | "deleted" | "removed"
+            )
+        });
+    if destructive_command || destructive_file_change {
+        AgentApprovalRisk::Critical
+    } else {
+        AgentApprovalRisk::Elevated
+    }
+}
+
+fn approval_scope(
+    kind: AgentApprovalKind,
+    cwd: Option<&str>,
+    network_host: Option<&str>,
+) -> String {
+    match (kind, network_host, cwd) {
+        (AgentApprovalKind::Network, Some(host), _) => format!("Este destino exato: {host}"),
+        (AgentApprovalKind::FileChange, _, Some(root)) => {
+            format!("Estas alterações exatas sob {root}")
+        }
+        (_, _, Some(cwd)) => format!("Esta ação e diretório exatos em {cwd}"),
+        _ => "Esta ação exata nesta sessão".into(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_approval_request(
     request: RpcRequest,
@@ -696,14 +1059,26 @@ fn handle_approval_request(
     let item_id = required_value_string(&request.params, "itemId")?;
     let preview = item_previews.get(&item_id).cloned().unwrap_or_default();
     let reason = optional_limited_string(request.params.get("reason"), 4 * 1024);
+    let environment_id = optional_action_string(request.params.get("environmentId"), 1024)?;
+    let broader_policy_ignored = [
+        "proposedExecpolicyAmendment",
+        "proposedNetworkPolicyAmendments",
+    ]
+    .iter()
+    .any(|field| {
+        request
+            .params
+            .get(*field)
+            .is_some_and(|value| !value.is_null())
+    });
     let (kind, command, cwd, files, network_host, network_protocol) = match request.method.as_str()
     {
         "item/commandExecution/requestApproval" => {
             let network = request.params.get("networkApprovalContext");
             let network_host =
-                optional_limited_string(network.and_then(|value| value.get("host")), 1024);
+                optional_action_string(network.and_then(|value| value.get("host")), 1024)?;
             let network_protocol =
-                optional_limited_string(network.and_then(|value| value.get("protocol")), 64);
+                optional_action_string(network.and_then(|value| value.get("protocol")), 64)?;
             let kind = if network_host.is_some() {
                 AgentApprovalKind::Network
             } else if request.params.get("kind").and_then(Value::as_str) == Some("writeStdin") {
@@ -713,9 +1088,9 @@ fn handle_approval_request(
             };
             (
                 kind,
-                optional_limited_string(request.params.get("command"), 16 * 1024)
+                optional_action_string(request.params.get("command"), 64 * 1024)?
                     .or(preview.command),
-                optional_limited_string(request.params.get("cwd"), 4 * 1024).or(preview.cwd),
+                optional_action_string(request.params.get("cwd"), 4 * 1024)?.or(preview.cwd),
                 Vec::new(),
                 network_host,
                 network_protocol,
@@ -724,43 +1099,114 @@ fn handle_approval_request(
         "item/fileChange/requestApproval" => (
             AgentApprovalKind::FileChange,
             None,
-            optional_limited_string(request.params.get("grantRoot"), 4 * 1024),
+            optional_action_string(request.params.get("grantRoot"), 4 * 1024)?,
             preview.files,
             None,
             None,
         ),
         _ => return Err(AgentRuntimeError::ApprovalRequired),
     };
+    if (kind == AgentApprovalKind::Command && command.is_none())
+        || (kind == AgentApprovalKind::Network
+            && (network_host.is_none() || network_protocol.is_none()))
+        || (kind == AgentApprovalKind::FileChange && files.is_empty())
+    {
+        return Err(AgentRuntimeError::InvalidProtocol);
+    }
 
-    let (approval_id, receiver) = approvals.register(thread_id, turn_id, &item_id)?;
-    emit(AgentStreamEvent::ApprovalRequested {
-        approval_id: approval_id.clone(),
-        thread_id: thread_id.to_owned(),
-        turn_id: turn_id.to_owned(),
-        item_id,
+    let action_sha256 = approval_action_sha256(
         kind,
-        reason,
-        command,
-        cwd,
-        files,
-        network_host,
-        network_protocol,
+        &reason,
+        &command,
+        &cwd,
+        &files,
+        &network_host,
+        &network_protocol,
+        &environment_id,
+    )?;
+    let risk = approval_risk(kind, command.as_deref(), &files);
+    let session_scope = approval_scope(kind, cwd.as_deref(), network_host.as_deref());
+    let registration = approvals.register(
+        thread_id,
+        turn_id,
+        &item_id,
+        &action_sha256,
+        kind,
+        &session_scope,
+    )?;
+    let ApprovalRegistration::Pending {
+        approval_id,
+        receiver,
+    } = registration
+    else {
+        let ApprovalRegistration::SessionAccepted {
+            approval_id,
+            rule_id,
+        } = registration
+        else {
+            unreachable!();
+        };
+        transport.notification(&RpcResponse {
+            id: request.id,
+            result: Some(serde_json::json!({ "decision": "accept" })),
+            error: None,
+        })?;
+        emit(AgentStreamEvent::ApprovalSessionApplied {
+            approval_id,
+            action_sha256,
+            kind,
+            rule_id,
+        });
+        return Ok(());
+    };
+    emit(AgentStreamEvent::ApprovalRequested {
+        request: Box::new(AgentApprovalRequest {
+            approval_id: approval_id.clone(),
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            item_id,
+            action_sha256,
+            kind,
+            risk,
+            reason,
+            command,
+            cwd,
+            files,
+            network_host,
+            network_protocol,
+            environment_id,
+            broader_policy_ignored,
+            expires_in_ms: APPROVAL_TTL.as_millis() as u64,
+            session_scope,
+        }),
     });
-    let decision = match receiver.recv() {
-        Ok(decision) => decision,
-        Err(_) => {
+    let (decision, expired) = match receiver.recv_timeout(APPROVAL_TTL) {
+        Ok(decision) => (decision, false),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            approvals.expire(&approval_id)?;
+            (AgentApprovalDecision::Decline, true)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
             approvals.discard(&approval_id);
             return Err(AgentRuntimeError::TransportClosed);
         }
     };
+    // Session grants remain owned and revocable by Lyrnova. The provider receives
+    // only a one-shot acceptance and cannot silently retain broader authority.
+    let provider_decision = if decision == AgentApprovalDecision::AcceptForSession {
+        AgentApprovalDecision::Accept
+    } else {
+        decision
+    };
     transport.notification(&RpcResponse {
         id: request.id,
-        result: Some(serde_json::json!({ "decision": decision.wire_value() })),
+        result: Some(serde_json::json!({ "decision": provider_decision.wire_value() })),
         error: None,
     })?;
     emit(AgentStreamEvent::ApprovalResolved {
         approval_id,
         decision,
+        expired,
     });
     Ok(())
 }
@@ -1011,12 +1457,28 @@ mod tests {
     #[test]
     fn approval_broker_binds_resolution_to_thread_turn_and_item_once() {
         let broker = ApprovalBroker::default();
-        let (approval_id, receiver) = broker.register("thr_1", "turn_1", "item_1").unwrap();
+        let ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "sha256-action",
+                AgentApprovalKind::Command,
+                "Esta ação exata",
+            )
+            .unwrap()
+        else {
+            panic!("a primeira aprovação deve ficar pendente");
+        };
         let mismatched = AgentApprovalResolution {
             approval_id: approval_id.clone(),
             thread_id: "thr_other".into(),
             turn_id: "turn_1".into(),
             item_id: "item_1".into(),
+            action_sha256: "sha256-action".into(),
             decision: AgentApprovalDecision::Accept,
         };
         assert_eq!(
@@ -1029,6 +1491,7 @@ mod tests {
             thread_id: "thr_1".into(),
             turn_id: "turn_1".into(),
             item_id: "item_1".into(),
+            action_sha256: "sha256-action".into(),
             decision: AgentApprovalDecision::Decline,
         };
         broker.resolve(resolution.clone()).unwrap();
@@ -1036,6 +1499,267 @@ mod tests {
         assert_eq!(
             broker.resolve(resolution),
             Err(AgentRuntimeError::ApprovalNotFound)
+        );
+    }
+
+    #[test]
+    fn approval_hash_change_is_rejected_without_consuming_the_request() {
+        let broker = ApprovalBroker::default();
+        let ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "expected-hash",
+                AgentApprovalKind::FileChange,
+                "Estas alterações exatas",
+            )
+            .unwrap()
+        else {
+            panic!("a aprovação deve ficar pendente");
+        };
+        let changed = AgentApprovalResolution {
+            approval_id: approval_id.clone(),
+            thread_id: "thr_1".into(),
+            turn_id: "turn_1".into(),
+            item_id: "item_1".into(),
+            action_sha256: "changed-hash".into(),
+            decision: AgentApprovalDecision::Accept,
+        };
+        assert_eq!(
+            broker.resolve(changed),
+            Err(AgentRuntimeError::ApprovalMismatch)
+        );
+        let valid = AgentApprovalResolution {
+            approval_id,
+            thread_id: "thr_1".into(),
+            turn_id: "turn_1".into(),
+            item_id: "item_1".into(),
+            action_sha256: "expected-hash".into(),
+            decision: AgentApprovalDecision::Decline,
+        };
+        broker.resolve(valid).unwrap();
+        assert_eq!(receiver.recv().unwrap(), AgentApprovalDecision::Decline);
+    }
+
+    #[test]
+    fn narrow_session_rule_is_reused_and_can_be_revoked() {
+        let broker = ApprovalBroker::default();
+        let ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "same-action",
+                AgentApprovalKind::Network,
+                "Este destino exato: example.com",
+            )
+            .unwrap()
+        else {
+            panic!("a aprovação deve ficar pendente");
+        };
+        broker
+            .resolve(AgentApprovalResolution {
+                approval_id,
+                thread_id: "thr_1".into(),
+                turn_id: "turn_1".into(),
+                item_id: "item_1".into(),
+                action_sha256: "same-action".into(),
+                decision: AgentApprovalDecision::AcceptForSession,
+            })
+            .unwrap();
+        assert_eq!(
+            receiver.recv().unwrap(),
+            AgentApprovalDecision::AcceptForSession
+        );
+
+        let ApprovalRegistration::SessionAccepted { rule_id, .. } = broker
+            .register(
+                "thr_1",
+                "turn_2",
+                "item_2",
+                "same-action",
+                AgentApprovalKind::Network,
+                "Este destino exato: example.com",
+            )
+            .unwrap()
+        else {
+            panic!("a regra exata deveria ser reaplicada");
+        };
+        broker.revoke_session_rule(&rule_id).unwrap();
+        assert!(matches!(
+            broker.register(
+                "thr_1",
+                "turn_3",
+                "item_3",
+                "same-action",
+                AgentApprovalKind::Network,
+                "Este destino exato: example.com",
+            ),
+            Ok(ApprovalRegistration::Pending { .. })
+        ));
+    }
+
+    #[test]
+    fn expired_approval_fails_closed_and_is_audited_without_content() {
+        let broker = ApprovalBroker::default();
+        let ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "safe-hash-only",
+                AgentApprovalKind::Command,
+                "Esta ação exata",
+            )
+            .unwrap()
+        else {
+            panic!("a aprovação deve ficar pendente");
+        };
+        broker
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .get_mut(&approval_id)
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_millis(1);
+
+        assert_eq!(
+            broker.resolve(AgentApprovalResolution {
+                approval_id,
+                thread_id: "thr_1".into(),
+                turn_id: "turn_1".into(),
+                item_id: "item_1".into(),
+                action_sha256: "safe-hash-only".into(),
+                decision: AgentApprovalDecision::Accept,
+            }),
+            Err(AgentRuntimeError::ApprovalExpired)
+        );
+        assert_eq!(receiver.recv().unwrap(), AgentApprovalDecision::Decline);
+        let snapshot = broker.snapshot().unwrap();
+        assert_eq!(snapshot.audit[0].source, AgentApprovalSource::Timeout);
+        assert_eq!(snapshot.audit[0].decision, AgentApprovalDecision::Decline);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("rm -rf secret"));
+    }
+
+    #[test]
+    fn command_path_and_network_changes_produce_different_action_hashes() {
+        let hash = |command: Option<&str>, cwd: Option<&str>, host: Option<&str>| {
+            approval_action_sha256(
+                if host.is_some() {
+                    AgentApprovalKind::Network
+                } else {
+                    AgentApprovalKind::Command
+                },
+                &None,
+                &command.map(str::to_owned),
+                &cwd.map(str::to_owned),
+                &[],
+                &host.map(str::to_owned),
+                &Some("https".into()),
+                &None,
+            )
+            .unwrap()
+        };
+        let original = hash(Some("cargo test"), Some("/workspace"), None);
+        assert_ne!(
+            original,
+            hash(Some("cargo check"), Some("/workspace"), None)
+        );
+        assert_ne!(original, hash(Some("cargo test"), Some("/other"), None));
+        assert_ne!(
+            hash(None, None, Some("example.com")),
+            hash(None, None, Some("other.example"))
+        );
+    }
+
+    #[test]
+    fn concurrent_duplicate_decisions_only_consume_an_approval_once() {
+        let broker = ApprovalBroker::default();
+        let ApprovalRegistration::Pending {
+            approval_id,
+            receiver,
+        } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "race-bound-hash",
+                AgentApprovalKind::Command,
+                "Esta ação exata",
+            )
+            .unwrap()
+        else {
+            panic!("a aprovação deve ficar pendente");
+        };
+        let resolution = AgentApprovalResolution {
+            approval_id,
+            thread_id: "thr_1".into(),
+            turn_id: "turn_1".into(),
+            item_id: "item_1".into(),
+            action_sha256: "race-bound-hash".into(),
+            decision: AgentApprovalDecision::Accept,
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let attempts: Vec<_> = (0..2)
+            .map(|_| {
+                let broker = broker.clone();
+                let resolution = resolution.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    broker.resolve(resolution)
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(AgentRuntimeError::ApprovalNotFound))
+                .count(),
+            1
+        );
+        assert_eq!(receiver.recv().unwrap(), AgentApprovalDecision::Accept);
+    }
+
+    #[test]
+    fn lifecycle_close_denies_pending_approvals() {
+        let broker = ApprovalBroker::default();
+        let ApprovalRegistration::Pending { receiver, .. } = broker
+            .register(
+                "thr_1",
+                "turn_1",
+                "item_1",
+                "closing-hash",
+                AgentApprovalKind::FileChange,
+                "Estas alterações exatas",
+            )
+            .unwrap()
+        else {
+            panic!("a aprovação deve ficar pendente");
+        };
+        broker.clear_session();
+        assert_eq!(receiver.recv().unwrap(), AgentApprovalDecision::Decline);
+        assert_eq!(
+            broker.snapshot().unwrap().audit[0].source,
+            AgentApprovalSource::Lifecycle
         );
     }
 
@@ -1057,6 +1781,47 @@ mod tests {
         assert_eq!(preview.0, "item_patch");
         assert_eq!(preview.1.files[0].path, "src/main.rs");
         assert_eq!(preview.1.files[0].kind, "update");
+    }
+
+    #[test]
+    fn approval_previews_reject_partial_or_oversized_effect_descriptions() {
+        let too_many_changes: Vec<_> = (0..201)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("src/{index}.rs"),
+                    "kind": "update",
+                    "diff": "safe",
+                })
+            })
+            .collect();
+        assert_eq!(
+            item_preview(&serde_json::json!({
+                "item": { "type": "fileChange", "id": "patch", "changes": too_many_changes }
+            })),
+            Err(AgentRuntimeError::InvalidProtocol)
+        );
+        assert_eq!(
+            item_preview(&serde_json::json!({
+                "item": {
+                    "type": "commandExecution",
+                    "id": "command",
+                    "command": "x".repeat(64 * 1024 + 1),
+                    "cwd": "/workspace"
+                }
+            })),
+            Err(AgentRuntimeError::InvalidProtocol)
+        );
+        let exact = item_preview(&serde_json::json!({
+            "item": {
+                "type": "commandExecution",
+                "id": "command",
+                "command": "  printf exact  ",
+                "cwd": "/workspace"
+            }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(exact.1.command.as_deref(), Some("  printf exact  "));
     }
 
     #[test]

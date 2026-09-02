@@ -119,6 +119,8 @@ const taskReviewCommand = document.querySelector("#task-review-command");
 const taskRiskNote = document.querySelector("#task-risk-note");
 const taskReviewNote = document.querySelector("#task-review-note");
 const taskReviewConfirm = document.querySelector("#task-review-confirm");
+const approvalSessionRules = document.querySelector("#approval-session-rules");
+const approvalAuditList = document.querySelector("#approval-audit-list");
 const PLUGIN_PERMISSION_LABELS = Object.freeze({
   workspace_read: ["Ler o workspace", "Acessa arquivos dentro do projeto aberto."],
   workspace_write: ["Alterar o workspace", "Modifica arquivos dentro do projeto aberto."],
@@ -158,6 +160,8 @@ let currentTasks = [];
 let pendingTaskReview = null;
 let runningTask = null;
 let dockView = "terminal";
+let currentApprovalState = { sessionRules: [], audit: [] };
+let recentProcessAudits = [];
 
 const documentFixtures = new Map([
   ["src-tauri/src/backend.rs", `use std::collections::BTreeMap;
@@ -1062,6 +1066,20 @@ async function bindTaskOutput() {
   }
 }
 
+async function bindProcessAudit() {
+  if (!listen) return;
+  try {
+    await listen("process-audit", ({ payload }) => {
+      if (!payload?.eventId || recentProcessAudits.some((entry) => entry.eventId === payload.eventId)) return;
+      recentProcessAudits.unshift({ ...payload, observedAtMs: Date.now() });
+      recentProcessAudits = recentProcessAudits.slice(0, 100);
+      renderApprovalState(currentApprovalState);
+    });
+  } catch {
+    /* Auditoria de processo é complementar; a fronteira Rust continua ativa. */
+  }
+}
+
 function taskAccessLabel(task) {
   if (task.access === "workspace_write") return "Escrita";
   return task.network ? "Rede" : "Somente leitura";
@@ -1140,6 +1158,7 @@ function appendTaskReviewMetadata(label, value) {
   term.textContent = label;
   const detail = document.createElement("dd");
   detail.textContent = value;
+  detail.title = value;
   taskReviewMetadata.append(term, detail);
 }
 
@@ -1160,6 +1179,14 @@ async function showTaskReview(pluginId, taskId) {
     appendTaskReviewMetadata("Acesso", review.process.access === "workspace_write" ? "Escrita limitada ao workspace" : "Workspace somente leitura");
     appendTaskReviewMetadata("Rede", review.process.network ? "Permitida pelo grant do plugin" : "Negada");
     appendTaskReviewMetadata("Sandbox", review.process.sandbox === "strong" ? "Forte" : "Indisponível");
+    appendTaskReviewMetadata("Timeout", `${Math.round(review.process.timeoutMs / 1000)} s`);
+    if (review.process.environmentKeys?.length) {
+      appendTaskReviewMetadata("Dados redigidos", `Valores de environment ocultos (${review.process.environmentKeys.join(", ")})`);
+    } else {
+      appendTaskReviewMetadata("Dados redigidos", "Nenhum");
+    }
+    appendTaskReviewMetadata("Validade", `${Math.round(review.process.expiresInMs / 60_000)} min · uso único`);
+    appendTaskReviewMetadata("Hash da ação", review.process.actionSha256);
     taskReviewCommand.textContent = review.process.command;
     taskRiskNote.dataset.risk = review.process.risk;
     taskRiskNote.textContent = review.process.risk === "destructive"
@@ -1169,6 +1196,8 @@ async function showTaskReview(pluginId, taskId) {
         : "Execução somente leitura. O comando ainda será isolado e auditado.");
     taskReviewNote.hidden = true;
     taskReviewConfirm.disabled = false;
+    taskReviewConfirm.className = review.process.risk === "destructive" ? "danger-button" : "accent-button";
+    taskReviewConfirm.textContent = review.process.risk === "destructive" ? "Executar ação destrutiva" : "Executar task";
     previousFocus = document.activeElement;
     taskReviewDialog.showModal();
     taskReviewConfirm.focus();
@@ -1203,7 +1232,10 @@ async function executeReviewedTask() {
   setDockView("tasks");
   announce(`Executando ${review.label}`);
   try {
-    const result = await invoke("task_execute", { reviewToken: review.process.reviewToken });
+    const result = await invoke("task_execute", {
+      reviewToken: review.process.reviewToken,
+      actionSha256: review.process.actionSha256,
+    });
     const code = result.exitCode === null ? "sem código" : `código ${result.exitCode}`;
     appendTaskOutput(`\n[${result.outcome} · ${code} · ${result.durationMs} ms${result.stdoutTruncated || result.stderrTruncated ? " · saída truncada" : ""}]\n`);
     announce(result.outcome === "exited" && result.exitCode === 0 ? "Task concluída" : "Task encerrada");
@@ -1787,6 +1819,117 @@ function updateDraftState() {
   renderEditorTabs();
 }
 
+function approvalKindLabel(kind) {
+  return ({
+    command: "Comando",
+    file_change: "Alteração de arquivos",
+    network: "Rede",
+    write_stdin: "Entrada de processo",
+  })[kind] ?? "Ação";
+}
+
+function renderApprovalState(state) {
+  currentApprovalState = state;
+  approvalSessionRules.replaceChildren();
+  if (!state.sessionRules?.length) {
+    const empty = document.createElement("p");
+    empty.className = "plugin-list-empty";
+    empty.textContent = "Nenhuma regra ativa.";
+    approvalSessionRules.append(empty);
+  } else {
+    state.sessionRules.forEach((rule) => {
+      const row = document.createElement("article");
+      row.className = "approval-state-row";
+      const copy = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = approvalKindLabel(rule.kind);
+      const scope = document.createElement("p");
+      scope.textContent = rule.scope;
+      const hash = document.createElement("code");
+      hash.textContent = `SHA-256 ${rule.actionSha256}`;
+      copy.append(title, scope, hash);
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "danger-button subtle-danger";
+      revoke.dataset.approvalRuleRevoke = rule.ruleId;
+      revoke.textContent = "Revogar";
+      revoke.setAttribute("aria-label", `Revogar regra de ${title.textContent}`);
+      row.append(copy, revoke);
+      approvalSessionRules.append(row);
+    });
+  }
+
+  approvalAuditList.replaceChildren();
+  if (!state.audit?.length && !recentProcessAudits.length) {
+    const empty = document.createElement("p");
+    empty.className = "plugin-list-empty";
+    empty.textContent = "Nenhuma decisão nesta sessão.";
+    approvalAuditList.append(empty);
+    return;
+  }
+  const decisions = {
+    accept: "Permitida uma vez",
+    accept_for_session: "Permitida na sessão",
+    decline: "Negada",
+    cancel: "Turno cancelado",
+  };
+  const sources = { user: "usuário", session_rule: "regra da sessão", timeout: "expiração", lifecycle: "fim da sessão" };
+  state.audit.forEach((entry) => {
+    const row = document.createElement("article");
+    row.className = "approval-state-row approval-audit-row";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${approvalKindLabel(entry.kind)} · ${decisions[entry.decision] ?? entry.decision}`;
+    const detail = document.createElement("p");
+    const time = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(entry.decidedAtMs));
+    detail.textContent = `${sources[entry.source] ?? entry.source} · ${time}`;
+    const hash = document.createElement("code");
+    hash.textContent = `SHA-256 ${entry.actionSha256}`;
+    copy.append(title, detail, hash);
+    row.append(copy);
+    approvalAuditList.append(row);
+  });
+  const processPhases = { reviewed: "Revisada", started: "Iniciada", completed: "Concluída" };
+  recentProcessAudits.forEach((entry) => {
+    const row = document.createElement("article");
+    row.className = "approval-state-row approval-audit-row";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `Task/processo · ${processPhases[entry.phase] ?? entry.phase}`;
+    const detail = document.createElement("p");
+    const time = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(entry.observedAtMs));
+    detail.textContent = `${entry.origin} · ${time}`;
+    const hash = document.createElement("code");
+    hash.textContent = `SHA-256 do comando ${entry.commandSha256}`;
+    copy.append(title, detail, hash);
+    row.append(copy);
+    approvalAuditList.append(row);
+  });
+}
+
+async function loadApprovalState() {
+  if (!invoke || !approvalSessionRules || !approvalAuditList) return;
+  try {
+    renderApprovalState(await invoke("agent_approval_state"));
+  } catch {
+    approvalSessionRules.textContent = "Não foi possível consultar as aprovações desta sessão.";
+    approvalAuditList.replaceChildren();
+  }
+}
+
+async function revokeApprovalRule(ruleId, button) {
+  if (!invoke || !ruleId) return;
+  button.disabled = true;
+  try {
+    await invoke("agent_approval_session_revoke", { ruleId });
+    await loadApprovalState();
+    announce("Regra de aprovação revogada");
+  } catch {
+    button.disabled = false;
+    announce("A regra já não estava ativa");
+  }
+}
+
 function setEditorError(message) {
   editorWorkspace.dataset.saveState = "error";
   draftState.lastChild.textContent = ` ${message}`;
@@ -1801,6 +1944,7 @@ function showWorkspaceView(view, focusEditor = false) {
     conversation.classList.remove("visible");
     editorWorkspace.hidden = true;
     settingsWorkspace.hidden = false;
+    void loadApprovalState();
     if (narrowWorkspace.matches) appShell.dataset.sidebarOpen = "false";
     return;
   }
@@ -2372,6 +2516,7 @@ function createApprovalDetail(label, value) {
   term.textContent = label;
   const description = document.createElement("dd");
   description.textContent = value;
+  description.title = value;
   wrapper.append(term, description);
   return wrapper;
 }
@@ -2386,10 +2531,12 @@ function createApprovalCard(event) {
   const [title, badge] = labels[event.kind] ?? ["Autorizar ação", "Aprovação"];
   const card = document.createElement("article");
   card.className = "approval-card";
+  card.setAttribute("role", "region");
   card.dataset.approvalId = event.approvalId;
   card.dataset.threadId = event.threadId;
   card.dataset.turnId = event.turnId;
   card.dataset.itemId = event.itemId;
+  card.dataset.actionSha256 = event.actionSha256;
 
   const heading = document.createElement("div");
   heading.className = "approval-heading";
@@ -2402,11 +2549,14 @@ function createApprovalCard(event) {
   eyebrow.className = "eyebrow";
   eyebrow.textContent = "O agente solicita permissão";
   const headingTitle = document.createElement("h2");
+  headingTitle.id = `approval-title-${event.approvalId}`;
   headingTitle.textContent = title;
+  card.setAttribute("aria-labelledby", headingTitle.id);
   headingCopy.append(eyebrow, headingTitle);
   const risk = document.createElement("span");
   risk.className = "risk-badge";
-  risk.textContent = badge;
+  risk.dataset.risk = event.risk;
+  risk.textContent = event.risk === "critical" ? `${badge} · crítica` : `${badge} · atenção`;
   heading.append(icon, headingCopy, risk);
   card.append(heading);
 
@@ -2426,6 +2576,12 @@ function createApprovalCard(event) {
   details.className = "approval-details";
   if (event.reason) details.append(createApprovalDetail("Motivo", event.reason));
   if (event.cwd) details.append(createApprovalDetail(event.kind === "file_change" ? "Raiz solicitada" : "Diretório", event.cwd));
+  if (event.environmentId) details.append(createApprovalDetail("Dados redigidos", `Valores do ambiente “${event.environmentId}” não são expostos pelo provider`));
+  else details.append(createApprovalDetail("Dados redigidos", "Nenhum campo redigido declarado no pedido"));
+  if (event.broaderPolicyIgnored) details.append(createApprovalDetail("Ampliação sugerida", "Ignorada; o Lyrnova permite somente este hash exato"));
+  if (event.sessionScope) details.append(createApprovalDetail("Escopo da sessão", event.sessionScope));
+  details.append(createApprovalDetail("Validade", `${Math.round(event.expiresInMs / 60_000)} min · decisão de uso único`));
+  details.append(createApprovalDetail("Hash da ação", event.actionSha256));
   if (event.files?.length) {
     const files = document.createElement("div");
     files.className = "approval-file-list";
@@ -2452,12 +2608,17 @@ function createApprovalCard(event) {
 
   const actions = document.createElement("div");
   actions.className = "approval-actions";
-  [
+  const decisions = [
     ["decline", "Negar", "secondary-button"],
     ["cancel", "Cancelar turno", "secondary-button"],
     ["accept_for_session", "Permitir na sessão", "secondary-button"],
-    ["accept", "Permitir uma vez", "accent-button"],
-  ].forEach(([decision, label, className]) => {
+    [
+      "accept",
+      event.risk === "critical" ? "Executar ação crítica" : "Permitir uma vez",
+      event.risk === "critical" ? "danger-button" : "accent-button",
+    ],
+  ];
+  decisions.forEach(([decision, label, className]) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = className;
@@ -2480,6 +2641,7 @@ async function resolveApproval(card, decision) {
         threadId: card.dataset.threadId,
         turnId: card.dataset.turnId,
         itemId: card.dataset.itemId,
+        actionSha256: card.dataset.actionSha256,
         decision,
       },
     });
@@ -2500,7 +2662,7 @@ function completeApproval(event) {
   card.querySelector(".approval-actions")?.remove();
   const result = document.createElement("p");
   result.className = "approval-result";
-  result.textContent = ({
+  result.textContent = event.expired ? "A aprovação expirou e foi negada." : ({
     accept: "Permitido uma vez.",
     accept_for_session: "Permitido para esta sessão do agente.",
     decline: "Ação negada.",
@@ -2509,6 +2671,7 @@ function completeApproval(event) {
   card.append(result);
   setAgentBusy(true);
   announce(result.textContent);
+  void loadApprovalState();
 }
 
 function handleAgentStream(event) {
@@ -2526,6 +2689,10 @@ function handleAgentStream(event) {
     announce("O agente está aguardando sua aprovação");
   }
   if (event.type === "approval_resolved") completeApproval(event);
+  if (event.type === "approval_session_applied") {
+    announce("Uma regra exata desta sessão autorizou a ação automaticamente");
+    void loadApprovalState();
+  }
   if (event.type === "turn_completed") {
     const completed = event.status === "completed";
     setAgentBusy(false, completed ? "Pronto" : "Falhou");
@@ -2728,6 +2895,11 @@ document.addEventListener("click", (event) => {
   if (decision) {
     const card = decision.closest(".approval-card");
     if (card) void resolveApproval(card, decision.dataset.decision);
+  }
+
+  const approvalRule = event.target.closest("[data-approval-rule-revoke]");
+  if (approvalRule) {
+    void revokeApprovalRule(approvalRule.dataset.approvalRuleRevoke, approvalRule);
   }
 
   const gitAction = event.target.closest("[data-git-action]");
@@ -2933,6 +3105,7 @@ bindWindowControls();
 bindPanelResizers();
 void bindTerminalOutput();
 void bindTaskOutput();
+void bindProcessAudit();
 
 function applyAiProviderAvailability(provider) {
   activeAiProvider = provider;

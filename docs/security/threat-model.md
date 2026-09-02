@@ -44,6 +44,8 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | Plugin tenta ler segredo | roots, deny rules e redaction |
 | Exfiltração | rede negada por padrão e approval por destino |
 | Approval reaproveitada | vínculo ao hash da ação exibida |
+| Provider amplia “permitir na sessão” | regra local limitada à conversa + hash exato; provider recebe aceite pontual |
+| Timeout ou janela fechada vira aceite | expiração e lifecycle sempre negam pendências |
 | Patch sobre arquivo alterado | precondition/hash e conflito explícito |
 | Processo continua após cancelamento | process group/job e cleanup |
 | Processo inunda stdout/stderr | drenagem concorrente e captura limitada por stream |
@@ -180,3 +182,12 @@ Auditoria contém o hash do comando, nunca seu conteúdo. Tasks externas são ca
 tipados e limitados; o núcleo consulta a definição novamente, deriva autoridade dos
 grants persistidos e entrega à interface apenas uma revisão com token opaco. Grants
 mudados e lifecycle do plugin/workspace invalidam revisões e cancelam processos.
+
+Approvals do agente e revisões de Tasks agora também exigem o SHA-256 integral da ação
+apresentada pelo frontend. Comando, cwd, arquivos, domínio, environment e política
+fazem parte do vínculo conforme o tipo; qualquer divergência preserva ou nega o token
+sem executar o efeito. Aprovações expiram em cinco minutos e decisões duplicadas não
+encontram mais a solicitação consumida. Regras de sessão ficam no núcleo, limitadas à
+conversa e ao hash exato, são revogáveis nas Configurações e nunca são delegadas como
+política persistente ao provider. O histórico em memória contém somente categoria,
+decisão, origem, horário e hash, sem comandos, diffs ou valores de environment.
