@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `f382c44`
-Estado: sandbox, catálogo autenticado, protocolo externo e providers opcionais implementados.
+Commit-base: `89418f9`
+Estado: plataforma segura de plugins documentada para autores externos.
 
 ## Direção consolidada
 
@@ -92,6 +92,11 @@ Estado: sandbox, catálogo autenticado, protocolo externo e providers opcionais 
 - Commands de conta, chat, ferramentas e approvals repetem a autorização antes do
   adapter. Runtimes de IA sem adapter tipado são recusados, sem encaminhar payload
   genérico ao frontend.
+- Manual para terceiros documenta manifesto, capabilities, permissões, entrypoint,
+  sandbox, protocolo, empacotamento reproduzível, sidecar SHA-256, testes, updates
+  e preparação para publicação autenticada.
+- O manual explicita que a instalação local é a distribuição disponível hoje e que
+  o catálogo curado aguarda chaves raiz e tooling oficial de assinatura.
 - Licença do código autoral migrada de MIT para `GPL-3.0-only`.
 - Texto integral oficial da GNU GPL versão 3 instalado em `LICENSE`.
 - Metadados Cargo, npm, AppStream e RPM atualizados, sem alterar as licenças das
@@ -145,11 +150,10 @@ dependências e não devem ser substituídas.
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
 2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-3. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
-   permissões, empacotamento, sidecar SHA-256, testes e publicação.
+3. selecionar com o mantenedor o próximo item do roadmap.
 
 ## Estado do repositório
 
-O commit `f382c44` contém o broker sandboxed, o catálogo autenticado e os ADRs
-0011 e 0012. Este checkpoint acrescenta o protocolo externo, a resolução opcional
-de providers e os ADRs 0013 e 0014; nenhum pacote OBS ou release foi realizado.
+O commit `89418f9` contém o protocolo externo, a resolução opcional de providers e
+os ADRs 0013 e 0014. Este checkpoint acrescenta o manual para autores de plugins;
+nenhum pacote OBS ou release foi realizado.

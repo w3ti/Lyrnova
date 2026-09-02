@@ -2,6 +2,9 @@
 
 Status: contrato inicial da API de plugins v1.
 
+Para um fluxo completo de criação, teste, empacotamento e publicação, consulte o
+[`Manual de desenvolvimento de plugins`](development-guide.md).
+
 Cada plugin possui um `plugin.json` validado pelo núcleo antes de aparecer no
 catálogo. Campos desconhecidos, versões incompatíveis, enums desconhecidos,
 IDs duplicados, URLs fora de HTTPS/GitHub e entrypoints inseguros são
