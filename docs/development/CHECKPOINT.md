@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `4ff8bb6`
-Estado: alterações locais validadas; aguardando a próxima etapa de desenvolvimento.
+Commit-base: `23f40e0`
+Estado: instalador transacional local implementado e validado; alterações ainda não commitadas.
 
 ## Direção consolidada
 
@@ -24,7 +24,16 @@ Estado: alterações locais validadas; aguardando a próxima etapa de desenvolvi
 - Instalação exige aprovação exata das permissões e operações sensíveis do adapter
   Codex verificam declaração e concessão.
 - Manifests externos não podem se declarar embutidos; processos exigem entrypoint
-  relativo, protocolo conhecido e `process_spawn`; releases exigem SHA-256 válido.
+  relativo, protocolo conhecido e `process_spawn`.
+- Pacotes externos `.tar.zst` usam descritor SHA-256 separado do manifesto para
+  evitar a circularidade de um arquivo declarar o próprio hash.
+- Instalador local em duas fases implementado: staging/inspeção e instalação após
+  aprovação exata das permissões.
+- Extração limitada por tamanho comprimido, fluxo descomprimido, arquivo, soma e
+  quantidade; traversal, paths não UTF-8, links, tipos especiais e duplicatas falham.
+- Manifesto externo e entrypoint são revalidados no staging; falha ou abandono limpa
+  temporários; instalação usa rename atômico, não substitui versão e nasce desabilitada
+  e sem bit de execução.
 - Alterações de instalação, remoção e habilitação só entram em memória depois de a
   persistência ser concluída.
 - Licença do código autoral migrada de MIT para `GPL-3.0-only`.
@@ -49,7 +58,7 @@ Estado: alterações locais validadas; aguardando a próxima etapa de desenvolvi
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace --offline` (59 testes aprovados e 1 teste de integração
+- `cargo test --workspace --offline` (66 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -74,13 +83,15 @@ dependências e não devem ser substituídas.
 ## Ao retomar
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
-2. implementar o instalador transacional de pacotes externos em área de staging,
-   verificando tamanho, SHA-256 e conteúdo antes de qualquer ativação;
-3. adicionar à interface a revisão explícita das permissões declaradas pelo manifesto;
-4. manter providers de IA opcionais e ausentes da instalação inicial;
-5. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita.
+2. integrar pacotes instalados ao catálogo dinâmico, sempre desabilitados inicialmente;
+3. adicionar commands Tauri e interface para selecionar pacote, revisar manifesto e
+   permissões e confirmar ou cancelar o staging;
+4. implementar download somente depois, com descritor vindo de catálogo confiável;
+5. manter providers de IA opcionais e ausentes da instalação inicial;
+6. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita.
 
 ## Estado do repositório
 
-Há alterações locais não commitadas e vários arquivos novos ainda não rastreados. Eles
-devem ser preservados. Nenhum push, pacote OBS ou release foi realizado neste ponto.
+Há alterações locais não commitadas do instalador e dois arquivos novos ainda não
+rastreados. Eles devem ser preservados. Nenhum push, pacote OBS ou release foi
+realizado neste ponto.

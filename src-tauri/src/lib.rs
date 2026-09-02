@@ -2,6 +2,7 @@ pub mod app_server;
 pub mod backend;
 pub mod git;
 pub mod plugin_manifest;
+pub mod plugin_package;
 pub mod plugins;
 pub mod protocol;
 pub mod terminal;

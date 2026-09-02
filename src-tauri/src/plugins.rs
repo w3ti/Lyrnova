@@ -12,7 +12,7 @@ use tauri::Manager;
 
 use crate::plugin_manifest::{
     ManifestOrigin, PluginCapability, PluginCompatibility, PluginKind, PluginManifest,
-    PluginPermission, parse_manifest,
+    PluginPermission, parse_manifest, permissions_exactly_match,
 };
 
 pub const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
@@ -148,8 +148,10 @@ impl PluginRegistry {
                     .flatten()
                     .copied()
                     .collect();
-                let permissions_approved =
-                    permissions_match(&manifest.permissions, granted_permissions.iter().copied());
+                let permissions_approved = permissions_exactly_match(
+                    &manifest.permissions,
+                    granted_permissions.iter().copied(),
+                );
                 PluginSummary {
                     schema_version: manifest.schema_version,
                     id: manifest.id.clone(),
@@ -181,7 +183,7 @@ impl PluginRegistry {
         self.preferences.read().is_ok_and(|preferences| {
             preferences.installed.contains(id)
                 && preferences.enabled.contains(id)
-                && permissions_match(
+                && permissions_exactly_match(
                     &manifest.permissions,
                     preferences.grants.get(id).into_iter().flatten().copied(),
                 )
@@ -218,7 +220,7 @@ impl PluginRegistry {
         approved_permissions: &[PluginPermission],
     ) -> Result<Vec<PluginSummary>, PluginError> {
         let manifest = catalog_plugin(id)?;
-        if !permissions_match(&manifest.permissions, approved_permissions.iter().copied()) {
+        if !permissions_exactly_match(&manifest.permissions, approved_permissions.iter().copied()) {
             return Err(PluginError::PermissionApprovalRequired);
         }
         {
@@ -278,7 +280,7 @@ impl PluginRegistry {
                 return Err(PluginError::NotInstalled);
             }
             if enabled
-                && !permissions_match(
+                && !permissions_exactly_match(
                     &manifest.permissions,
                     preferences.grants.get(id).into_iter().flatten().copied(),
                 )
@@ -350,19 +352,6 @@ fn catalog_plugin(id: &str) -> Result<&'static PluginManifest, PluginError> {
         .ok_or(PluginError::UnknownPlugin)
 }
 
-fn permissions_match(
-    requested: &[PluginPermission],
-    granted: impl IntoIterator<Item = PluginPermission>,
-) -> bool {
-    let granted: Vec<_> = granted.into_iter().collect();
-    let granted_set: BTreeSet<_> = granted.iter().copied().collect();
-    granted.len() == granted_set.len()
-        && requested.len() == granted_set.len()
-        && requested
-            .iter()
-            .all(|permission| granted_set.contains(permission))
-}
-
 fn normalize_preferences(
     mut preferences: PluginPreferences,
     catalog: &[PluginManifest],
@@ -383,7 +372,7 @@ fn normalize_preferences(
                 .iter()
                 .find(|plugin| &plugin.id == id)
                 .is_some_and(|manifest| {
-                    permissions_match(
+                    permissions_exactly_match(
                         &manifest.permissions,
                         preferences.grants.get(id).into_iter().flatten().copied(),
                     )
@@ -478,16 +467,16 @@ mod tests {
     #[test]
     fn permission_approval_must_exactly_match_the_manifest() {
         let requested = [PluginPermission::WorkspaceRead];
-        assert!(permissions_match(&requested, requested));
-        assert!(!permissions_match(&requested, []));
-        assert!(!permissions_match(
+        assert!(permissions_exactly_match(&requested, requested));
+        assert!(!permissions_exactly_match(&requested, []));
+        assert!(!permissions_exactly_match(
             &requested,
             [
                 PluginPermission::WorkspaceRead,
                 PluginPermission::WorkspaceWrite,
             ]
         ));
-        assert!(!permissions_match(
+        assert!(!permissions_exactly_match(
             &requested,
             [
                 PluginPermission::WorkspaceRead,

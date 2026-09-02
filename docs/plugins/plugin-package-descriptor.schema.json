@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/w3ti/Lyrnova/blob/main/docs/plugins/plugin-package-descriptor.schema.json",
+  "title": "Lyrnova Plugin Package Descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["asset", "sha256"],
+  "properties": {
+    "asset": {
+      "type": "string",
+      "minLength": 9,
+      "maxLength": 240,
+      "pattern": "^[A-Za-z0-9._-]+\\.tar\\.zst$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -129,7 +129,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "repository", "asset", "sha256"],
+          "required": ["type", "repository", "asset"],
           "properties": {
             "type": { "const": "github_release" },
             "repository": { "$ref": "#/$defs/repository" },
@@ -138,8 +138,7 @@
               "minLength": 1,
               "maxLength": 240,
               "pattern": "^[A-Za-z0-9._-]+$"
-            },
-            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
           }
         }
       ]

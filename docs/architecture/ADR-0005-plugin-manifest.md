@@ -22,10 +22,10 @@ falham. Uma mudança no conjunto solicitado desabilita o plugin até nova
 revisão. Declaração, concessão, instalação e habilitação são verificadas antes
 de uma ação sensível.
 
-Pacotes de GitHub Release precisarão de SHA-256 válido. A validação atual não
-autoriza download nem execução: essas etapas terão componentes próprios e
-continuarão negadas até serem implementadas. A origem também é um parâmetro do
-parser, impedindo que um documento externo se declare embutido.
+Pacotes de GitHub Release precisam de SHA-256 válido em um descritor externo ao
+arquivo. O manifesto mantém a identidade do asset, mas não incorpora o hash do
+próprio pacote, o que seria circular. A origem também é um parâmetro do parser,
+impedindo que um documento externo se declare embutido.
 
 ## Consequências
 
@@ -36,3 +36,5 @@ parser, impedindo que um documento externo se declare embutido.
 - falhas de persistência não publicam o novo estado em memória;
 - o estado v2 é descartado com segurança ao migrar para o estado v3;
 - o adapter Codex passa a verificar permissões tipadas além de estar ativo.
+- a integridade do pacote depende de um descritor obtido por canal confiável;
+  o manifesto interno, sozinho, não autentica seu próprio conteúdo.

@@ -88,14 +88,8 @@ pub enum PluginRuntime {
     deny_unknown_fields
 )]
 pub enum PluginSource {
-    Bundled {
-        repository: String,
-    },
-    GithubRelease {
-        repository: String,
-        asset: String,
-        sha256: String,
-    },
+    Bundled { repository: String },
+    GithubRelease { repository: String, asset: String },
 }
 
 impl PluginSource {
@@ -147,7 +141,6 @@ pub enum ManifestError {
     UnsupportedProcessProtocol,
     ProcessPermissionRequired,
     InvalidReleaseAsset,
-    InvalidChecksum,
     DuplicateCapability,
     DuplicatePermission,
 }
@@ -164,6 +157,19 @@ pub fn parse_manifest(
         serde_json::from_str(contents).map_err(|_| ManifestError::InvalidJson)?;
     validate_manifest(&manifest, host_version, origin)?;
     Ok(manifest)
+}
+
+pub fn permissions_exactly_match(
+    requested: &[PluginPermission],
+    granted: impl IntoIterator<Item = PluginPermission>,
+) -> bool {
+    let granted: Vec<_> = granted.into_iter().collect();
+    let granted_set: BTreeSet<_> = granted.iter().copied().collect();
+    granted.len() == granted_set.len()
+        && requested.len() == granted_set.len()
+        && requested
+            .iter()
+            .all(|permission| granted_set.contains(permission))
 }
 
 pub fn validate_manifest(
@@ -229,16 +235,9 @@ pub fn validate_manifest(
         }
     }
 
-    if let PluginSource::GithubRelease { asset, sha256, .. } = &manifest.source {
+    if let PluginSource::GithubRelease { asset, .. } = &manifest.source {
         if !safe_file_name(asset) {
             return Err(ManifestError::InvalidReleaseAsset);
-        }
-        if sha256.len() != 64
-            || !sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(ManifestError::InvalidChecksum);
         }
     }
 
@@ -355,8 +354,7 @@ mod tests {
       "source": {
         "type": "github_release",
         "repository": "https://github.com/w3ti/lyrnova-example",
-        "asset": "lyrnova-example.tar.zst",
-        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "asset": "lyrnova-example.tar.zst"
       },
       "capabilities": ["tasks"],
       "permissions": ["process_spawn"]
@@ -411,6 +409,19 @@ mod tests {
             ),
             Err(ManifestError::InvalidJson)
         );
+
+        let embedded_checksum = replaced(
+            "\"asset\": \"lyrnova-example.tar.zst\"",
+            "\"asset\": \"lyrnova-example.tar.zst\", \"sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        );
+        assert_eq!(
+            parse_manifest(
+                &embedded_checksum,
+                &host_version(),
+                ManifestOrigin::External
+            ),
+            Err(ManifestError::InvalidJson)
+        );
     }
 
     #[test]
@@ -439,16 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_checksums_and_incompatible_hosts() {
-        let checksum = replaced(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "ABC123",
-        );
-        assert_eq!(
-            parse_manifest(&checksum, &host_version(), ManifestOrigin::External),
-            Err(ManifestError::InvalidChecksum)
-        );
-
+    fn rejects_incompatible_hosts() {
         let incompatible = replaced(">=0.1.0, <0.2.0", ">=1.0.0");
         assert_eq!(
             parse_manifest(&incompatible, &host_version(), ManifestOrigin::External),

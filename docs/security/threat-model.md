@@ -75,8 +75,14 @@ experimental do plugin exige HTTPS e hosts OpenAI permitidos para login;
 tokens não cruzam a fronteira Rust. Processos, rede e filesystem solicitados
 por qualquer plugin permanecem sujeitos às permissões e approvals do núcleo.
 
-Manifests de plugin usam schema e enums fechados. Origem, compatibilidade,
-entrypoint e checksum são validados antes do catálogo; concessões ficam
-separadas da declaração. Uma mudança de permissões desabilita o plugin até nova
-revisão, e o adapter Codex verifica declaração e concessão em cada entrada
-sensível. Download e execução de pacotes externos continuam desativados.
+Manifests de plugin usam schema e enums fechados. Origem, compatibilidade e
+entrypoint são validados antes do catálogo; concessões ficam separadas da
+declaração. Uma mudança de permissões desabilita o plugin até nova revisão, e o
+adapter Codex verifica declaração e concessão em cada entrada sensível.
+
+O instalador local de `.tar.zst` compara o pacote com um descritor SHA-256
+externo e extrai em staging privado com limites de tamanho e quantidade. Ele
+recusa traversal, links, tipos especiais e duplicatas, valida novamente o
+manifesto e publica a versão por rename atômico somente após revisão exata das
+permissões. O pacote nasce desabilitado e não executável. Download, descoberta
+no catálogo e execução de pacotes externos continuam desativados.
