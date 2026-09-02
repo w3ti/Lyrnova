@@ -36,7 +36,8 @@ versão final nunca é substituída e a instalação nasce desabilitada.
 - aprovação de permissões é uma fronteira explícita entre revisão e instalação;
 - selecionar um arquivo local não confere autenticidade: o descritor esperado
   ainda precisa vir de um catálogo ou canal confiável;
-- download, assinatura, descoberta no catálogo, habilitação e execução são
-  etapas separadas e permanecem fora deste incremento;
+- download, assinatura, habilitação e execução são etapas separadas e
+  permanecem fora deste incremento; a descoberta posterior é definida pela
+  ADR-0007;
 - antes de habilitar um runtime externo, o host deverá materializar permissões
   executáveis e aplicar o sandbox definido pela política.

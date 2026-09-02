@@ -25,6 +25,10 @@ const MAX_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4_096;
 const MAX_ARCHIVE_PATH_BYTES: usize = 240;
+const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
+const INSTALL_RECEIPT_VERSION: u32 = 1;
+const INSTALL_RECEIPT_NAME: &str = ".lyrnova-install.json";
+pub(crate) const PACKAGES_DIRECTORY: &str = "packages";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -50,6 +54,22 @@ pub struct InstalledPluginPackage {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DiscoveredPluginPackage {
+    pub manifest: PluginManifest,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginInstallReceipt {
+    version: u32,
+    plugin_id: String,
+    plugin_version: Version,
+    descriptor: PluginPackageDescriptor,
+    content_sha256: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum PluginPackageError {
@@ -73,6 +93,10 @@ pub enum PluginPackageError {
     MissingEntrypoint,
     PermissionApprovalRequired,
     AlreadyInstalled,
+    MissingReceipt,
+    InvalidReceipt,
+    InvalidInstallLayout,
+    ContentIntegrityMismatch,
     StateUnavailable,
     Io,
 }
@@ -235,7 +259,10 @@ impl StagedPluginPackage {
             .mutation
             .lock()
             .map_err(|_| PluginPackageError::StateUnavailable)?;
-        let plugin_parent = self.root.join("packages").join(&self.review.manifest.id);
+        let plugin_parent = self
+            .root
+            .join(PACKAGES_DIRECTORY)
+            .join(&self.review.manifest.id);
         create_private_dir_all(&plugin_parent)?;
         let destination = plugin_parent.join(self.review.manifest.version.to_string());
         if destination
@@ -244,6 +271,16 @@ impl StagedPluginPackage {
         {
             return Err(PluginPackageError::AlreadyInstalled);
         }
+        let content_sha256 = content_sha256(&self.content_path)?;
+        let receipt = PluginInstallReceipt {
+            version: INSTALL_RECEIPT_VERSION,
+            plugin_id: self.review.manifest.id.clone(),
+            plugin_version: self.review.manifest.version.clone(),
+            descriptor: self.review.descriptor.clone(),
+            content_sha256,
+        };
+        write_install_receipt(&self.content_path, &receipt)?;
+        sync_directory(&self.content_path)?;
         fs::rename(&self.content_path, &destination).map_err(|_| PluginPackageError::Io)?;
         sync_directory(&plugin_parent)?;
 
@@ -253,6 +290,224 @@ impl StagedPluginPackage {
             enabled: false,
         })
     }
+}
+
+pub(crate) fn discover_installed_packages(
+    root: &Path,
+    host_version: &Version,
+) -> Result<Vec<DiscoveredPluginPackage>, PluginPackageError> {
+    let packages_root = root.join(PACKAGES_DIRECTORY);
+    match fs::symlink_metadata(&packages_root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(PluginPackageError::Io),
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(PluginPackageError::InvalidInstallLayout);
+        }
+        Ok(_) => {}
+    }
+
+    let mut discovered = Vec::new();
+    for id_entry in sorted_directory_entries(&packages_root)? {
+        if !id_entry
+            .file_type()
+            .map_err(|_| PluginPackageError::Io)?
+            .is_dir()
+        {
+            return Err(PluginPackageError::InvalidInstallLayout);
+        }
+        let id = id_entry
+            .file_name()
+            .into_string()
+            .map_err(|_| PluginPackageError::InvalidInstallLayout)?;
+        for version_entry in sorted_directory_entries(&id_entry.path())? {
+            if discovered.len() >= MAX_ENTRIES
+                || !version_entry
+                    .file_type()
+                    .map_err(|_| PluginPackageError::Io)?
+                    .is_dir()
+            {
+                return Err(PluginPackageError::InvalidInstallLayout);
+            }
+            let version = version_entry
+                .file_name()
+                .into_string()
+                .ok()
+                .and_then(|value| Version::parse(&value).ok())
+                .ok_or(PluginPackageError::InvalidInstallLayout)?;
+            discovered.push(discover_installed_package(
+                &version_entry.path(),
+                &id,
+                &version,
+                host_version,
+            )?);
+        }
+    }
+    Ok(discovered)
+}
+
+fn discover_installed_package(
+    path: &Path,
+    expected_id: &str,
+    expected_version: &Version,
+    host_version: &Version,
+) -> Result<DiscoveredPluginPackage, PluginPackageError> {
+    let receipt_path = path.join(INSTALL_RECEIPT_NAME);
+    let receipt_metadata =
+        fs::symlink_metadata(&receipt_path).map_err(|_| PluginPackageError::MissingReceipt)?;
+    if !receipt_metadata.file_type().is_file() || receipt_metadata.len() > MAX_RECEIPT_BYTES {
+        return Err(PluginPackageError::InvalidReceipt);
+    }
+    let receipt: PluginInstallReceipt = serde_json::from_slice(
+        &fs::read(&receipt_path).map_err(|_| PluginPackageError::InvalidReceipt)?,
+    )
+    .map_err(|_| PluginPackageError::InvalidReceipt)?;
+    if receipt.version != INSTALL_RECEIPT_VERSION
+        || receipt.plugin_id != expected_id
+        || &receipt.plugin_version != expected_version
+        || validate_descriptor(&receipt.descriptor).is_err()
+        || !valid_sha256(&receipt.content_sha256)
+    {
+        return Err(PluginPackageError::InvalidReceipt);
+    }
+    if content_sha256(path)? != receipt.content_sha256 {
+        return Err(PluginPackageError::ContentIntegrityMismatch);
+    }
+
+    let manifest_contents = fs::read_to_string(path.join("plugin.json"))
+        .map_err(|_| PluginPackageError::InvalidManifest)?;
+    let manifest = parse_manifest(&manifest_contents, host_version, ManifestOrigin::External)
+        .map_err(|_| PluginPackageError::InvalidManifest)?;
+    if manifest.id != expected_id || &manifest.version != expected_version {
+        return Err(PluginPackageError::InvalidInstallLayout);
+    }
+    let PluginSource::GithubRelease { asset, .. } = &manifest.source else {
+        return Err(PluginPackageError::InvalidManifest);
+    };
+    if asset != &receipt.descriptor.asset {
+        return Err(PluginPackageError::AssetMismatch);
+    }
+    let PluginRuntime::Process { entrypoint, .. } = &manifest.runtime else {
+        return Err(PluginPackageError::UnsupportedRuntime);
+    };
+    if !fs::symlink_metadata(path.join(entrypoint))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return Err(PluginPackageError::MissingEntrypoint);
+    }
+    Ok(DiscoveredPluginPackage {
+        manifest,
+        path: path.to_owned(),
+    })
+}
+
+fn write_install_receipt(
+    content_path: &Path,
+    receipt: &PluginInstallReceipt,
+) -> Result<(), PluginPackageError> {
+    let bytes = serde_json::to_vec_pretty(receipt).map_err(|_| PluginPackageError::Io)?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(PluginPackageError::Io);
+    }
+    let path = content_path.join(INSTALL_RECEIPT_NAME);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|_| PluginPackageError::Io)?;
+    set_private_file_permissions(&path)?;
+    file.write_all(&bytes).map_err(|_| PluginPackageError::Io)?;
+    file.sync_all().map_err(|_| PluginPackageError::Io)
+}
+
+fn content_sha256(root: &Path) -> Result<String, PluginPackageError> {
+    let mut entries = Vec::new();
+    collect_content_entries(root, root, &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    let mut expanded_bytes = 0u64;
+    for (relative, path, is_directory) in entries {
+        digest.update(if is_directory { b"d" } else { b"f" });
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        let metadata = fs::symlink_metadata(&path).map_err(|_| PluginPackageError::Io)?;
+        digest.update(security_mode(&metadata).to_be_bytes());
+        if is_directory {
+            continue;
+        }
+        if metadata.len() > MAX_ENTRY_BYTES {
+            return Err(PluginPackageError::EntryTooLarge);
+        }
+        expanded_bytes = expanded_bytes
+            .checked_add(metadata.len())
+            .ok_or(PluginPackageError::ExpandedSizeTooLarge)?;
+        if expanded_bytes > MAX_EXPANDED_BYTES {
+            return Err(PluginPackageError::ExpandedSizeTooLarge);
+        }
+        digest.update(metadata.len().to_be_bytes());
+        let mut file = File::open(path).map_err(|_| PluginPackageError::Io)?;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|_| PluginPackageError::Io)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(unix)]
+fn security_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn security_mode(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+fn collect_content_entries(
+    root: &Path,
+    directory: &Path,
+    entries: &mut Vec<(String, PathBuf, bool)>,
+) -> Result<(), PluginPackageError> {
+    for entry in sorted_directory_entries(directory)? {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| PluginPackageError::InvalidInstallLayout)?;
+        if relative == Path::new(INSTALL_RECEIPT_NAME) {
+            continue;
+        }
+        validate_archive_path(relative)?;
+        let relative = relative
+            .to_str()
+            .ok_or(PluginPackageError::UnsafeEntryPath)?
+            .to_owned();
+        let file_type = entry.file_type().map_err(|_| PluginPackageError::Io)?;
+        if !file_type.is_file() && !file_type.is_dir() {
+            return Err(PluginPackageError::UnsupportedEntryType);
+        }
+        if entries.len() >= MAX_ENTRIES {
+            return Err(PluginPackageError::TooManyEntries);
+        }
+        entries.push((relative, path.clone(), file_type.is_dir()));
+        if file_type.is_dir() {
+            collect_content_entries(root, &path, entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn sorted_directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, PluginPackageError> {
+    let mut entries: Vec<_> = fs::read_dir(path)
+        .map_err(|_| PluginPackageError::Io)?
+        .collect::<Result<_, _>>()
+        .map_err(|_| PluginPackageError::Io)?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    Ok(entries)
 }
 
 impl Drop for StagedPluginPackage {
@@ -367,15 +622,18 @@ fn archive_error(limit_exceeded: &AtomicBool) -> PluginPackageError {
 fn validate_descriptor(descriptor: &PluginPackageDescriptor) -> Result<(), PluginPackageError> {
     if !safe_asset_name(&descriptor.asset)
         || !descriptor.asset.ends_with(".tar.zst")
-        || descriptor.sha256.len() != 64
-        || !descriptor
-            .sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !valid_sha256(&descriptor.sha256)
     {
         return Err(PluginPackageError::InvalidDescriptor);
     }
     Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn safe_asset_name(value: &str) -> bool {
@@ -986,5 +1244,54 @@ mod tests {
             Err(PluginPackageError::AlreadyInstalled)
         );
         assert_eq!(staging_entry_count(&root), 0);
+    }
+
+    #[test]
+    fn restart_discovery_revalidates_the_receipt_and_content_tree() {
+        let root = TestDirectory::new();
+        let package_path = write_package(root.path(), ASSET, valid_entries());
+        let approved = [
+            PluginPermission::WorkspaceRead,
+            PluginPermission::ProcessSpawn,
+        ];
+        let installed = installer(&root)
+            .stage_local(&package_path, descriptor(&package_path))
+            .unwrap()
+            .install(&approved)
+            .unwrap();
+
+        assert!(installed.path.join(INSTALL_RECEIPT_NAME).is_file());
+        let discovered =
+            discover_installed_packages(&root.path().join("store"), &Version::new(0, 1, 0))
+                .unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].manifest, installed.manifest);
+        assert_eq!(discovered[0].path, installed.path);
+
+        fs::write(installed.path.join("bin/example"), b"tampered").unwrap();
+        assert!(matches!(
+            discover_installed_packages(&root.path().join("store"), &Version::new(0, 1, 0),),
+            Err(PluginPackageError::ContentIntegrityMismatch)
+        ));
+    }
+
+    #[test]
+    fn restart_discovery_fails_closed_without_a_valid_receipt() {
+        let root = TestDirectory::new();
+        let package_path = write_package(root.path(), ASSET, valid_entries());
+        let installed = installer(&root)
+            .stage_local(&package_path, descriptor(&package_path))
+            .unwrap()
+            .install(&[
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ])
+            .unwrap();
+        fs::remove_file(installed.path.join(INSTALL_RECEIPT_NAME)).unwrap();
+
+        assert!(matches!(
+            discover_installed_packages(&root.path().join("store"), &Version::new(0, 1, 0),),
+            Err(PluginPackageError::MissingReceipt)
+        ));
     }
 }

@@ -66,4 +66,12 @@ extraído e a quantidade de entradas; recusa traversal, paths não UTF-8, links,
 tipos especiais e entradas duplicadas. Depois valida novamente o manifesto e
 confere a existência do entrypoint. A instalação só ocorre após aprovação
 exata das permissões, por rename atômico, e permanece desabilitada. Download,
-descoberta no catálogo e execução externa ainda não estão conectados.
+remoção física e execução externa ainda não estão conectados.
+
+Na reinicialização, o catálogo externo é reconstruído apenas de instalações com
+recibo válido. O núcleo recalcula o SHA-256 da árvore, incluindo paths, tipos,
+modos, tamanhos e conteúdo, e valida novamente o manifesto e o entrypoint. A
+versão SemVer mais recente de cada ID aparece como instalada e desabilitada.
+Atualizações limpam habilitação e concessões; a aprovação exata pode ser
+persistida separadamente sem ativar o plugin. Qualquer pacote inválido faz o
+catálogo externo inteiro falhar fechado, preservando somente os embutidos.

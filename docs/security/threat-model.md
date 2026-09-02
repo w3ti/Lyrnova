@@ -84,5 +84,12 @@ O instalador local de `.tar.zst` compara o pacote com um descritor SHA-256
 externo e extrai em staging privado com limites de tamanho e quantidade. Ele
 recusa traversal, links, tipos especiais e duplicatas, valida novamente o
 manifesto e publica a versão por rename atômico somente após revisão exata das
-permissões. O pacote nasce desabilitado e não executável. Download, descoberta
-no catálogo e execução de pacotes externos continuam desativados.
+permissões. O pacote nasce desabilitado e não executável. Download e execução
+de pacotes externos continuam desativados.
+
+Cada instalação mantém um recibo host-managed com hash determinístico da árvore
+extraída. O catálogo recalcula esse hash e revalida layout, identidade, versão,
+manifesto e entrypoint em todo reload. Corrupção, links, arquivos especiais ou
+tentativa de sobrepor um ID embutido removem todos os plugins externos do estado
+de autoridade. Atualizações também removem habilitação e grants até nova
+revisão. O recibo não substitui assinatura criptográfica do publisher.
