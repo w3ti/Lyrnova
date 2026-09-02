@@ -1,6 +1,7 @@
 pub mod app_server;
 pub mod backend;
 pub mod git;
+pub mod plugin_manifest;
 pub mod plugins;
 pub mod protocol;
 pub mod terminal;
@@ -13,6 +14,7 @@ use std::sync::{
 use std::{fs, process::Command};
 
 use git::{GitError, GitService, GitStatusSummary};
+use plugin_manifest::PluginPermission;
 use plugins::{CODEX_PLUGIN_ID, PluginError, PluginRegistry, PluginSummary};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -332,10 +334,11 @@ fn plugin_list(
 #[tauri::command]
 fn plugin_install(
     plugin_id: String,
+    approved_permissions: Vec<PluginPermission>,
     app: tauri::AppHandle,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<PluginSummary>, PluginError> {
-    registry.install(&app, &plugin_id)
+    registry.install(&app, &plugin_id, &approved_permissions)
 }
 
 #[tauri::command]
@@ -396,7 +399,13 @@ async fn agent_account_read(
     state: tauri::State<'_, ProjectState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentConnectionStatus, AgentRuntimeError> {
-    require_codex_plugin(&plugins)?;
+    require_codex_permissions(
+        &plugins,
+        &[
+            PluginPermission::ProcessSpawn,
+            PluginPermission::NetworkAccess,
+        ],
+    )?;
     let root = agent_runtime_root(&state);
     tauri::async_runtime::spawn_blocking(move || app_server::read_account(&root))
         .await
@@ -408,7 +417,13 @@ async fn agent_logout(
     state: tauri::State<'_, ProjectState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentConnectionStatus, AgentRuntimeError> {
-    require_codex_plugin(&plugins)?;
+    require_codex_permissions(
+        &plugins,
+        &[
+            PluginPermission::ProcessSpawn,
+            PluginPermission::NetworkAccess,
+        ],
+    )?;
     let root = agent_runtime_root(&state);
     tauri::async_runtime::spawn_blocking(move || app_server::logout(&root))
         .await
@@ -423,7 +438,15 @@ async fn agent_turn_start(
     approvals: tauri::State<'_, ApprovalBroker>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<AgentTurnResult, AgentRuntimeError> {
-    require_codex_plugin(&plugins)?;
+    require_codex_permissions(
+        &plugins,
+        &[
+            PluginPermission::WorkspaceRead,
+            PluginPermission::ProcessSpawn,
+            PluginPermission::NetworkAccess,
+            PluginPermission::RequestApproval,
+        ],
+    )?;
     let root = project_snapshot(&state)
         .ok_or(AgentRuntimeError::InvalidRequest)?
         .workspace
@@ -445,7 +468,7 @@ fn agent_approval_resolve(
     approvals: tauri::State<'_, ApprovalBroker>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<(), AgentRuntimeError> {
-    require_codex_plugin(&plugins)?;
+    require_codex_permissions(&plugins, &[PluginPermission::RequestApproval])?;
     approvals.resolve(request)
 }
 
@@ -457,7 +480,13 @@ fn agent_login_start(
     login: tauri::State<'_, LoginState>,
     plugins: tauri::State<'_, PluginRegistry>,
 ) -> Result<(), AgentRuntimeError> {
-    require_codex_plugin(&plugins)?;
+    require_codex_permissions(
+        &plugins,
+        &[
+            PluginPermission::ProcessSpawn,
+            PluginPermission::NetworkAccess,
+        ],
+    )?;
     if login.0.swap(true, Ordering::AcqRel) {
         return Err(AgentRuntimeError::LoginInProgress);
     }
@@ -491,14 +520,18 @@ fn agent_runtime_root(state: &tauri::State<'_, ProjectState>) -> std::path::Path
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn require_codex_plugin(
+fn require_codex_permissions(
     plugins: &tauri::State<'_, PluginRegistry>,
+    permissions: &[PluginPermission],
 ) -> Result<(), AgentRuntimeError> {
-    if plugins.is_enabled(CODEX_PLUGIN_ID) {
-        Ok(())
-    } else {
-        Err(AgentRuntimeError::PluginDisabled)
+    if !plugins.is_enabled(CODEX_PLUGIN_ID) {
+        return Err(AgentRuntimeError::PluginDisabled);
     }
+    permissions.iter().try_for_each(|permission| {
+        plugins
+            .authorize(CODEX_PLUGIN_ID, *permission)
+            .map_err(|_| AgentRuntimeError::PluginPermissionDenied)
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

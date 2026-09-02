@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/w3ti/Lyrnova/blob/main/docs/plugins/plugin-manifest.schema.json",
+  "title": "Lyrnova Plugin Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "description",
+    "version",
+    "publisher",
+    "license",
+    "kind",
+    "compatibility",
+    "runtime",
+    "source",
+    "capabilities",
+    "permissions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?){2,}$"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$"
+    },
+    "publisher": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$"
+    },
+    "license": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "kind": {
+      "enum": ["language", "runtime", "framework", "tool", "ai_provider"]
+    },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "source": { "$ref": "#/$defs/source" },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/permission" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtime": {
+            "type": "object",
+            "properties": { "type": { "const": "process" } },
+            "required": ["type"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "permissions": { "contains": { "const": "process_spawn" } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lyrnova", "pluginApi"],
+      "properties": {
+        "lyrnova": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "pluginApi": { "const": 1 }
+      }
+    },
+    "runtime": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "module"],
+          "properties": {
+            "type": { "const": "builtin" },
+            "module": {
+              "type": "string",
+              "maxLength": 160,
+              "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)+$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "entrypoint", "protocolVersion"],
+          "properties": {
+            "type": { "const": "process" },
+            "entrypoint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "protocolVersion": { "const": 1 }
+          }
+        }
+      ]
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "repository"],
+          "properties": {
+            "type": { "const": "bundled" },
+            "repository": { "$ref": "#/$defs/repository" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "repository", "asset", "sha256"],
+          "properties": {
+            "type": { "const": "github_release" },
+            "repository": { "$ref": "#/$defs/repository" },
+            "asset": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240,
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "capability": {
+      "enum": [
+        "syntax_highlighting",
+        "autocomplete",
+        "diagnostics",
+        "snippets",
+        "templates",
+        "lsp",
+        "dap",
+        "tasks",
+        "tests",
+        "account_auth",
+        "ai_chat",
+        "ai_tools",
+        "approvals"
+      ]
+    },
+    "permission": {
+      "enum": [
+        "workspace_read",
+        "workspace_write",
+        "process_spawn",
+        "network_access",
+        "secret_storage",
+        "request_approval"
+      ]
+    }
+  }
+}

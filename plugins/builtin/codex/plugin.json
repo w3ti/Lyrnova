@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.w3ti.lyrnova.ai.codex",
+  "name": "Codex",
+  "description": "Chat de programação com conta OpenAI e approvals do Lyrnova.",
+  "version": "0.1.0",
+  "publisher": "w3ti",
+  "license": "GPL-3.0-only",
+  "kind": "ai_provider",
+  "compatibility": {
+    "lyrnova": ">=0.1.0, <0.2.0",
+    "pluginApi": 1
+  },
+  "runtime": {
+    "type": "builtin",
+    "module": "ai.codex"
+  },
+  "source": {
+    "type": "bundled",
+    "repository": "https://github.com/w3ti/Lyrnova"
+  },
+  "capabilities": [
+    "account_auth",
+    "ai_chat",
+    "ai_tools",
+    "approvals"
+  ],
+  "permissions": [
+    "workspace_read",
+    "process_spawn",
+    "network_access",
+    "request_approval"
+  ]
+}

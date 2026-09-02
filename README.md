@@ -85,6 +85,7 @@ APIs do Lyrnova; somente o núcleo concede autoridade e executa efeitos.
 
 - [Escopo e não objetivos](docs/product/scope.md)
 - [Decisões arquiteturais](docs/architecture/)
+- [Contrato de manifesto de plugins](docs/plugins/manifest.md)
 - [Threat model](docs/security/threat-model.md)
 - [Design system](docs/design-system.md)
 

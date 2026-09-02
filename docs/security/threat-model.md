@@ -74,3 +74,9 @@ consulta conta nem registra eventos de agente sem o plugin Codex ativo. A base
 experimental do plugin exige HTTPS e hosts OpenAI permitidos para login;
 tokens não cruzam a fronteira Rust. Processos, rede e filesystem solicitados
 por qualquer plugin permanecem sujeitos às permissões e approvals do núcleo.
+
+Manifests de plugin usam schema e enums fechados. Origem, compatibilidade,
+entrypoint e checksum são validados antes do catálogo; concessões ficam
+separadas da declaração. Uma mudança de permissões desabilita o plugin até nova
+revisão, e o adapter Codex verifica declaração e concessão em cada entrada
+sensível. Download e execução de pacotes externos continuam desativados.

@@ -237,6 +237,7 @@ pub enum AgentRuntimeError {
     ApprovalNotFound,
     ApprovalMismatch,
     PluginDisabled,
+    PluginPermissionDenied,
     LoginInProgress,
     UnsafeLoginUrl,
 }

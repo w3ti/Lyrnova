@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.w3ti.lyrnova.language.web",
+  "name": "Web Essentials",
+  "description": "HTML, CSS, JavaScript, TypeScript e templates web.",
+  "version": "0.1.0",
+  "publisher": "w3ti",
+  "license": "GPL-3.0-only",
+  "kind": "language",
+  "compatibility": {
+    "lyrnova": ">=0.1.0, <0.2.0",
+    "pluginApi": 1
+  },
+  "runtime": {
+    "type": "builtin",
+    "module": "language.web"
+  },
+  "source": {
+    "type": "bundled",
+    "repository": "https://github.com/w3ti/Lyrnova"
+  },
+  "capabilities": [
+    "syntax_highlighting",
+    "autocomplete",
+    "diagnostics",
+    "templates"
+  ],
+  "permissions": [
+    "workspace_read"
+  ]
+}
