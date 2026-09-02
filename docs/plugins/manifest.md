@@ -37,12 +37,23 @@ ao arquivo selecionado e ao manifesto antes de aceitar o pacote.
 O formato desse documento separado está em
 [`plugin-package-descriptor.schema.json`](plugin-package-descriptor.schema.json).
 
-O catálogo curado v1 é embarcado no aplicativo e validado antes de ser exibido.
-Cada entrada liga manifesto, descritor e tag de uma GitHub Release; a URL do asset
-é derivada pelo núcleo e nunca fornecida pelo frontend. O formato está em
+O catálogo curado v2 usa metadados versionados e expiráveis, assinados por um
+limiar de chaves raiz públicas embarcadas. Cada entrada liga manifesto, descritor
+e tag de uma GitHub Release a uma assinatura Ed25519 de uma chave delegada ao
+publisher. A URL do asset é derivada pelo núcleo e nunca fornecida pelo frontend.
+O formato está em
 [`plugin-catalog.schema.json`](plugin-catalog.schema.json). O catálogo distribuído
 permanece vazio até existir uma release real revisada, evitando exemplos baixáveis
 ou hashes fictícios.
+
+Atualizações aceitam apenas versões superiores, recusam downgrade de releases e
+expiração fora da janela permitida e são persistidas atomicamente somente após
+atingir o limiar raiz e validar todas as assinaturas de publishers. Rotação e
+revogação de publishers ocorrem nos metadados assinados; a raiz muda somente em
+uma nova versão do aplicativo. O contrato da raiz está em
+[`catalog-trust.schema.json`](catalog-trust.schema.json). Até o projeto concluir a
+cerimônia da chave pública oficial, updates remotos permanecem bloqueados por
+design e o catálogo vazio embarcado continua disponível.
 
 A origem do documento é fornecida separadamente ao parser: um pacote externo
 não pode se declarar `bundled` para evitar a verificação de integridade ou obter
@@ -92,8 +103,21 @@ Downloads do catálogo curado estão conectados pelo núcleo Rust. Eles aceitam 
 um ID, usam HTTPS com redirects limitados a hosts de releases do GitHub, impõem o
 limite de 64 MiB durante o streaming e gravam em diretório privado e temporário.
 Versões iguais e downgrades são recusados antes e depois da rede. O pacote baixado
-segue pelo mesmo staging, revisão e instalação desabilitada do fluxo local. Execução
-externa continua não conectada.
+segue pelo mesmo staging, revisão e instalação desabilitada do fluxo local. Antes
+da revisão, manifesto e descritor precisam ser idênticos à release assinada; a
+assinatura e o ID da chave são preservados no recibo e revalidados em todo reload.
+Pacotes selecionados localmente continuam permitidos, mas aparecem explicitamente
+como não autenticados.
+
+No Linux, ativar um runtime externo inicia seu entrypoint exclusivamente pelo broker
+Bubblewrap após nova validação do recibo e da árvore. O pacote permanece somente
+leitura; uma cópia privada do entrypoint é
+materializada apenas durante a sessão. O workspace ativo é montado em `/workspace`
+como leitura ou leitura/escrita conforme a concessão, e fica vazio sem permissão.
+A rede nasce isolada e só é compartilhada com `network_access`. Ambiente, HOME,
+secrets e paths externos não atravessam a fronteira. Se o sandbox estiver ausente,
+o plugin permanece desabilitado. Outras plataformas falham fechadas até terem um
+backend equivalente.
 
 Na reinicialização, o catálogo externo é reconstruído apenas de instalações com
 recibo válido. O núcleo recalcula o SHA-256 da árvore, incluindo paths, tipos,

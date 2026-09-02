@@ -12,6 +12,7 @@ BuildRequires:  gtk3-devel
 BuildRequires:  rust >= 1.85
 BuildRequires:  webkit2gtk3-devel
 BuildRequires:  zstd
+Requires:       bubblewrap
 Requires:       git-core
 Recommends:     xdg-utils
 

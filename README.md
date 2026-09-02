@@ -34,10 +34,11 @@ API key ou provider remoto.
 
 ## Plugins
 
-O catálogo e os releases de plugins serão hospedados no GitHub. Cada pacote
-terá manifesto versionado, origem, compatibilidade, capabilities, permissões e
-checksum verificáveis. Instalação, ativação, desativação, atualização e
-desinstalação serão controladas pelo gerenciador do Lyrnova.
+O catálogo curado e os releases de plugins são derivados do GitHub. Metadados
+remotos têm versão, expiração e assinaturas raiz; cada release é autenticada por
+uma chave Ed25519 delegada ao publisher e verificada também por SHA-256. Instalação
+local, download, ativação, desativação e desinstalação passam pelas fronteiras Rust
+do gerenciador do Lyrnova.
 
 Plugins de linguagem poderão fornecer syntax highlighting, tokens semânticos,
 LSP/autocomplete, DAP/debug, templates, tasks, testes e toolchains. Plugins de
@@ -49,8 +50,9 @@ Primeira coleção planejada:
 - linguagens e runtimes: Rust, Angular, React, Node.js e C/C++;
 - provedores de IA opcionais: Codex e Gemini.
 
-O catálogo embutido atual é somente uma base local de desenvolvimento. Nenhum
-download ou publicação de plugin é realizado nesta fase.
+O catálogo embarcado permanece vazio até existir uma release externa revisada;
+nenhum plugin fictício é oferecido para download. No Linux, runtimes externos
+são iniciados com Bubblewrap e recebem somente os mounts e a rede concedidos.
 
 ## Plataformas planejadas
 
@@ -70,7 +72,8 @@ gerenciador nativo para instalação e atualizações.
 O projeto está na fase de fundação funcional. O workspace Tauri 2 já oferece
 criação e abertura nativa de projetos, Explorer, Monaco Editor, abas, syntax e
 autocomplete, operações Git locais, terminal e painéis redimensionáveis. A
-plataforma de plugins e sua tela de gerenciamento estão em implementação.
+plataforma de plugins já cobre manifesto, instalação transacional, catálogo,
+remoção e lifecycle sandboxed; o protocolo funcional continua em implementação.
 
 A integração experimental com Codex App Server está sendo movida para um
 plugin opcional. Ela não representa uma dependência nem o propósito central do
@@ -91,8 +94,9 @@ APIs do Lyrnova; somente o núcleo concede autoridade e executa efeitos.
 
 ## Desenvolvimento local
 
-No Linux, são necessários Rust stable, Node.js 24, GTK 3 e WebKitGTK 4.1. Com
-as dependências do sistema instaladas:
+No Linux, são necessários Rust stable, Node.js 24, GTK 3 e WebKitGTK 4.1.
+Bubblewrap também é obrigatório para ativar plugins externos. Com as dependências
+do sistema instaladas:
 
 ```bash
 npm ci --prefix ui

@@ -1,45 +1,43 @@
 use std::{
-    collections::BTreeSet,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
-    time::Duration,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{Url, blocking::Client, redirect};
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    plugin_manifest::{ManifestOrigin, PluginManifest, PluginSource, validate_manifest},
-    plugin_package::{MAX_PACKAGE_BYTES, PluginPackageDescriptor},
+    plugin_manifest::{PluginManifest, PluginSource},
+    plugin_package::{MAX_PACKAGE_BYTES, PluginPackageAuthentication, PluginPackageDescriptor},
+    plugin_trust::{
+        CatalogPluginRelease, VerifiedCatalog, authentication_for, parse_authenticated_catalog,
+        parse_embedded_catalog, parse_trust, rejects_release_downgrade,
+        verify_installed_authentication,
+    },
 };
 
-const CATALOG_SCHEMA_VERSION: u32 = 1;
-const MAX_CATALOG_BYTES: usize = 512 * 1024;
-const MAX_CATALOG_ENTRIES: usize = 256;
+pub(crate) use crate::plugin_trust::PluginCatalogError;
+
 const MAX_RELEASE_TAG_BYTES: usize = 128;
 const DOWNLOADS_DIRECTORY: &str = ".downloads";
-const CATALOG_DOCUMENT: &str = include_str!("../../plugins/catalog/v1.json");
+const CATALOG_DIRECTORY: &str = ".catalog";
+const CACHED_CATALOG_FILE: &str = "catalog-v2.json";
+const CATALOG_DOCUMENT: &str = include_str!("../../plugins/catalog/v2.json");
+const TRUST_DOCUMENT: &str = include_str!("../../plugins/trust/catalog-root-v1.json");
+const REMOTE_CATALOG_URL: &str =
+    "https://github.com/w3ti/Lyrnova/releases/latest/download/plugin-catalog-v2.json";
 
-static TRUSTED_CATALOG: OnceLock<Result<Vec<TrustedPluginRelease>, PluginCatalogError>> =
-    OnceLock::new();
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TrustedPluginCatalogDocument {
-    schema_version: u32,
-    entries: Vec<TrustedPluginRelease>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub(crate) struct TrustedPluginRelease {
     pub(crate) manifest: PluginManifest,
     pub(crate) descriptor: PluginPackageDescriptor,
-    release_tag: String,
+    pub(crate) release_tag: String,
+    pub(crate) authentication: PluginPackageAuthentication,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -47,102 +45,150 @@ pub(crate) struct TrustedPluginRelease {
 pub(crate) struct TrustedPluginSummary {
     pub manifest: PluginManifest,
     pub descriptor: PluginPackageDescriptor,
+    pub publisher_key_id: String,
     pub installed_version: Option<Version>,
     pub download_available: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
-pub(crate) enum PluginCatalogError {
-    InvalidCatalog,
-    UnknownPlugin,
-    DownloadUrlDenied,
-    DownloadFailed,
-    DownloadTooLarge,
-    Io,
+#[derive(Clone, Debug)]
+pub(crate) struct PluginCatalogService {
+    catalog: Arc<RwLock<Result<VerifiedCatalog, PluginCatalogError>>>,
+    update_lock: Arc<Mutex<()>>,
 }
 
-pub(crate) fn catalog_summaries() -> Result<Vec<TrustedPluginSummary>, PluginCatalogError> {
-    Ok(trusted_catalog()?
-        .iter()
-        .map(|entry| TrustedPluginSummary {
-            manifest: entry.manifest.clone(),
-            descriptor: entry.descriptor.clone(),
-            installed_version: None,
-            download_available: true,
-        })
-        .collect())
-}
-
-pub(crate) fn trusted_release(id: &str) -> Result<TrustedPluginRelease, PluginCatalogError> {
-    trusted_catalog()?
-        .iter()
-        .find(|entry| entry.manifest.id == id)
-        .cloned()
-        .ok_or(PluginCatalogError::UnknownPlugin)
-}
-
-fn trusted_catalog() -> Result<&'static [TrustedPluginRelease], PluginCatalogError> {
-    match TRUSTED_CATALOG.get_or_init(|| {
-        let host_version = Version::parse(env!("CARGO_PKG_VERSION"))
-            .map_err(|_| PluginCatalogError::InvalidCatalog)?;
-        parse_catalog(CATALOG_DOCUMENT, &host_version)
-    }) {
-        Ok(entries) => Ok(entries),
-        Err(error) => Err(*error),
-    }
-}
-
-fn parse_catalog(
-    document: &str,
-    host_version: &Version,
-) -> Result<Vec<TrustedPluginRelease>, PluginCatalogError> {
-    if document.len() > MAX_CATALOG_BYTES {
-        return Err(PluginCatalogError::InvalidCatalog);
-    }
-    let catalog: TrustedPluginCatalogDocument =
-        serde_json::from_str(document).map_err(|_| PluginCatalogError::InvalidCatalog)?;
-    if catalog.schema_version != CATALOG_SCHEMA_VERSION
-        || catalog.entries.len() > MAX_CATALOG_ENTRIES
-    {
-        return Err(PluginCatalogError::InvalidCatalog);
-    }
-
-    let mut ids = BTreeSet::new();
-    for entry in &catalog.entries {
-        validate_manifest(&entry.manifest, host_version, ManifestOrigin::External)
-            .map_err(|_| PluginCatalogError::InvalidCatalog)?;
-        entry
-            .descriptor
-            .validate()
-            .map_err(|_| PluginCatalogError::InvalidCatalog)?;
-        let PluginSource::GithubRelease { asset, .. } = &entry.manifest.source else {
-            return Err(PluginCatalogError::InvalidCatalog);
-        };
-        if asset != &entry.descriptor.asset
-            || !valid_release_tag(&entry.release_tag)
-            || !ids.insert(entry.manifest.id.clone())
-            || github_release_url(entry).is_err()
-        {
-            return Err(PluginCatalogError::InvalidCatalog);
+impl Default for PluginCatalogService {
+    fn default() -> Self {
+        let host_version = host_version();
+        let catalog = host_version
+            .and_then(|version| parse_embedded_catalog(CATALOG_DOCUMENT, &version, unix_time()));
+        Self {
+            catalog: Arc::new(RwLock::new(catalog)),
+            update_lock: Arc::new(Mutex::new(())),
         }
     }
-    Ok(catalog.entries)
 }
 
-fn valid_release_tag(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag.len() <= MAX_RELEASE_TAG_BYTES
-        && tag.as_bytes()[0].is_ascii_alphanumeric()
-        && tag
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+impl PluginCatalogService {
+    pub(crate) fn load_cached(&self, root: &Path) -> Result<(), PluginCatalogError> {
+        let path = root.join(CATALOG_DIRECTORY).join(CACHED_CATALOG_FILE);
+        let bytes = match read_bounded_regular_file(&path) {
+            Ok(bytes) => bytes,
+            Err(PluginCatalogError::Io) if !path.exists() => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let trust = parse_trust(TRUST_DOCUMENT)?;
+        let next = parse_authenticated_catalog(&bytes, &host_version()?, &trust, unix_time())?;
+        let current = self.snapshot()?;
+        if next.signed.version < current.signed.version
+            || rejects_release_downgrade(&current, &next)
+        {
+            return Err(PluginCatalogError::CatalogRollback);
+        }
+        *self.catalog.write().map_err(|_| PluginCatalogError::Io)? = Ok(next);
+        Ok(())
+    }
+
+    pub(crate) fn summaries(&self) -> Result<Vec<TrustedPluginSummary>, PluginCatalogError> {
+        Ok(self
+            .snapshot()?
+            .signed
+            .entries
+            .into_iter()
+            .map(|entry| TrustedPluginSummary {
+                publisher_key_id: entry.publisher_signature.key_id.clone(),
+                manifest: entry.manifest,
+                descriptor: entry.descriptor,
+                installed_version: None,
+                download_available: true,
+            })
+            .collect())
+    }
+
+    pub(crate) fn trusted_release(
+        &self,
+        id: &str,
+    ) -> Result<TrustedPluginRelease, PluginCatalogError> {
+        let catalog = self.snapshot()?;
+        let release = catalog
+            .signed
+            .entries
+            .iter()
+            .find(|entry| entry.manifest.id == id)
+            .ok_or(PluginCatalogError::UnknownPlugin)?;
+        Ok(release_from_entry(catalog.signed.version, release))
+    }
+
+    pub(crate) fn verify_installed(
+        &self,
+        manifest: &PluginManifest,
+        descriptor: &PluginPackageDescriptor,
+        authentication: &PluginPackageAuthentication,
+    ) -> Result<(), PluginCatalogError> {
+        verify_installed_authentication(&self.snapshot()?, manifest, descriptor, authentication)
+    }
+
+    pub(crate) fn update(&self, root: &Path) -> Result<(), PluginCatalogError> {
+        let trust = parse_trust(TRUST_DOCUMENT)?;
+        if trust.keys.is_empty() || trust.threshold > trust.keys.len() {
+            return Err(PluginCatalogError::NoTrustedCatalogKeys);
+        }
+        let bytes = download_catalog_document()?;
+        self.apply_update(root, &bytes, unix_time())
+    }
+
+    fn apply_update(&self, root: &Path, bytes: &[u8], now: u64) -> Result<(), PluginCatalogError> {
+        let _guard = self
+            .update_lock
+            .lock()
+            .map_err(|_| PluginCatalogError::Io)?;
+        let trust = parse_trust(TRUST_DOCUMENT)?;
+        let next = parse_authenticated_catalog(bytes, &host_version()?, &trust, now)?;
+        let current = self.snapshot()?;
+        if next.signed.version <= current.signed.version
+            || rejects_release_downgrade(&current, &next)
+        {
+            return Err(PluginCatalogError::CatalogRollback);
+        }
+        persist_catalog(root, bytes)?;
+        *self.catalog.write().map_err(|_| PluginCatalogError::Io)? = Ok(next);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<VerifiedCatalog, PluginCatalogError> {
+        self.catalog
+            .read()
+            .map_err(|_| PluginCatalogError::Io)?
+            .clone()
+    }
+}
+
+fn release_from_entry(version: u64, entry: &CatalogPluginRelease) -> TrustedPluginRelease {
+    TrustedPluginRelease {
+        manifest: entry.manifest.clone(),
+        descriptor: entry.descriptor.clone(),
+        release_tag: entry.release_tag.clone(),
+        authentication: authentication_for(version, entry),
+    }
+}
+
+fn host_version() -> Result<Version, PluginCatalogError> {
+    Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| PluginCatalogError::InvalidCatalog)
+}
+
+fn unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(u64::MAX)
 }
 
 fn github_release_url(entry: &TrustedPluginRelease) -> Result<Url, PluginCatalogError> {
     let PluginSource::GithubRelease { repository, .. } = &entry.manifest.source else {
         return Err(PluginCatalogError::InvalidCatalog);
     };
+    if !valid_release_tag(&entry.release_tag) {
+        return Err(PluginCatalogError::InvalidCatalog);
+    }
     let mut url = Url::parse(repository).map_err(|_| PluginCatalogError::InvalidCatalog)?;
     if !trusted_initial_url(&url) {
         return Err(PluginCatalogError::DownloadUrlDenied);
@@ -155,6 +201,15 @@ fn github_release_url(entry: &TrustedPluginRelease) -> Result<Url, PluginCatalog
     );
     url.set_path(&path);
     Ok(url)
+}
+
+fn valid_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= MAX_RELEASE_TAG_BYTES
+        && tag.as_bytes()[0].is_ascii_alphanumeric()
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn trusted_initial_url(url: &Url) -> bool {
@@ -183,6 +238,54 @@ fn trusted_url_basics(url: &Url) -> bool {
         && url.fragment().is_none()
 }
 
+fn http_client() -> Result<Client, PluginCatalogError> {
+    Client::builder()
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
+        .user_agent(concat!("Lyrnova/", env!("CARGO_PKG_VERSION")))
+        .redirect(redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if trusted_redirect_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("redirect target denied")
+            }
+        }))
+        .build()
+        .map_err(|_| PluginCatalogError::DownloadFailed)
+}
+
+fn download_catalog_document() -> Result<Vec<u8>, PluginCatalogError> {
+    let url = Url::parse(REMOTE_CATALOG_URL).map_err(|_| PluginCatalogError::InvalidCatalog)?;
+    if !trusted_initial_url(&url) {
+        return Err(PluginCatalogError::DownloadUrlDenied);
+    }
+    let mut response = http_client()?
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|_| PluginCatalogError::DownloadFailed)?;
+    if !trusted_redirect_url(response.url()) {
+        return Err(PluginCatalogError::DownloadUrlDenied);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > crate::plugin_trust::MAX_CATALOG_BYTES as u64)
+    {
+        return Err(PluginCatalogError::DownloadTooLarge);
+    }
+    let mut bytes = Vec::new();
+    copy_bounded(
+        &mut response,
+        &mut bytes,
+        crate::plugin_trust::MAX_CATALOG_BYTES as u64,
+    )?;
+    Ok(bytes)
+}
+
 pub(crate) struct DownloadedPluginPackage {
     directory: PathBuf,
     path: PathBuf,
@@ -208,23 +311,7 @@ pub(crate) fn download_release(
     release: &TrustedPluginRelease,
 ) -> Result<DownloadedPluginPackage, PluginCatalogError> {
     let url = github_release_url(release)?;
-    let client = Client::builder()
-        .https_only(true)
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(180))
-        .user_agent(concat!("Lyrnova/", env!("CARGO_PKG_VERSION")))
-        .redirect(redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("too many redirects")
-            } else if trusted_redirect_url(attempt.url()) {
-                attempt.follow()
-            } else {
-                attempt.error("redirect target denied")
-            }
-        }))
-        .build()
-        .map_err(|_| PluginCatalogError::DownloadFailed)?;
-    let mut response = client
+    let mut response = http_client()?
         .get(url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
@@ -240,7 +327,7 @@ pub(crate) fn download_release(
         return Err(PluginCatalogError::DownloadTooLarge);
     }
 
-    let directory = create_download_directory(root)?;
+    let directory = create_private_child_directory(root, DOWNLOADS_DIRECTORY)?;
     let path = directory.join(&release.descriptor.asset);
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -271,24 +358,19 @@ pub(crate) fn cleanup_downloads(root: &Path) {
     }
 }
 
-fn create_download_directory(root: &Path) -> Result<PathBuf, PluginCatalogError> {
+fn create_private_child_directory(root: &Path, child: &str) -> Result<PathBuf, PluginCatalogError> {
     fs::create_dir_all(root).map_err(|_| PluginCatalogError::Io)?;
-    let root_metadata = fs::symlink_metadata(root).map_err(|_| PluginCatalogError::Io)?;
-    if !root_metadata.file_type().is_dir() {
+    if !fs::symlink_metadata(root)
+        .map_err(|_| PluginCatalogError::Io)?
+        .file_type()
+        .is_dir()
+    {
         return Err(PluginCatalogError::Io);
     }
-    let downloads_root = root.join(DOWNLOADS_DIRECTORY);
-    match fs::symlink_metadata(&downloads_root) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&downloads_root).map_err(|_| PluginCatalogError::Io)?;
-        }
-        Err(_) => return Err(PluginCatalogError::Io),
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => return Err(PluginCatalogError::Io),
-    }
-    set_private_dir_permissions(&downloads_root)?;
+    let parent = root.join(child);
+    ensure_private_directory(&parent)?;
     for _ in 0..8 {
-        let directory = downloads_root.join(Uuid::new_v4().simple().to_string());
+        let directory = parent.join(Uuid::new_v4().simple().to_string());
         match fs::create_dir(&directory) {
             Ok(()) => {
                 set_private_dir_permissions(&directory)?;
@@ -299,6 +381,73 @@ fn create_download_directory(root: &Path) -> Result<PathBuf, PluginCatalogError>
         }
     }
     Err(PluginCatalogError::Io)
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), PluginCatalogError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|_| PluginCatalogError::Io)?;
+        }
+        Err(_) => return Err(PluginCatalogError::Io),
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err(PluginCatalogError::Io),
+    }
+    set_private_dir_permissions(path)
+}
+
+fn persist_catalog(root: &Path, bytes: &[u8]) -> Result<(), PluginCatalogError> {
+    fs::create_dir_all(root).map_err(|_| PluginCatalogError::Io)?;
+    if !fs::symlink_metadata(root)
+        .map_err(|_| PluginCatalogError::Io)?
+        .file_type()
+        .is_dir()
+    {
+        return Err(PluginCatalogError::Io);
+    }
+    let directory = root.join(CATALOG_DIRECTORY);
+    ensure_private_directory(&directory)?;
+    let target = directory.join(CACHED_CATALOG_FILE);
+    if fs::symlink_metadata(&target).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return Err(PluginCatalogError::Io);
+    }
+    let temporary = directory.join(format!(".{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| PluginCatalogError::Io)?;
+        set_private_file_permissions(&temporary)?;
+        file.write_all(bytes).map_err(|_| PluginCatalogError::Io)?;
+        file.sync_all().map_err(|_| PluginCatalogError::Io)?;
+        fs::rename(&temporary, &target).map_err(|_| PluginCatalogError::Io)?;
+        File::open(&directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| PluginCatalogError::Io)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, PluginCatalogError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| PluginCatalogError::Io)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > crate::plugin_trust::MAX_CATALOG_BYTES as u64
+    {
+        return Err(PluginCatalogError::InvalidCatalog);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .map_err(|_| PluginCatalogError::Io)?
+        .take(crate::plugin_trust::MAX_CATALOG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| PluginCatalogError::Io)?;
+    if bytes.len() > crate::plugin_trust::MAX_CATALOG_BYTES {
+        return Err(PluginCatalogError::InvalidCatalog);
+    }
+    Ok(bytes)
 }
 
 fn copy_bounded(
@@ -372,95 +521,19 @@ mod tests {
         }
     }
 
-    fn catalog_document(id: &str, asset: &str, release_tag: &str) -> String {
-        format!(
-            r#"{{
-              "schemaVersion": 1,
-              "entries": [{{
-                "manifest": {{
-                  "schemaVersion": 1,
-                  "id": "{id}",
-                  "name": "Example",
-                  "description": "Curated external plugin used by catalog tests.",
-                  "version": "0.1.0",
-                  "publisher": "example",
-                  "license": "GPL-3.0-only",
-                  "kind": "tool",
-                  "compatibility": {{ "lyrnova": ">=0.1.0, <0.2.0", "pluginApi": 1 }},
-                  "runtime": {{ "type": "process", "entrypoint": "bin/example", "protocolVersion": 1 }},
-                  "source": {{
-                    "type": "github_release",
-                    "repository": "https://github.com/example/lyrnova-example",
-                    "asset": "{asset}"
-                  }},
-                  "capabilities": ["tasks"],
-                  "permissions": ["workspace_read", "process_spawn"]
-                }},
-                "descriptor": {{ "asset": "{asset}", "sha256": "{}" }},
-                "releaseTag": "{release_tag}"
-              }}]
-            }}"#,
-            "a".repeat(64)
-        )
-    }
-
-    #[test]
-    fn curated_catalog_derives_the_release_url_from_validated_fields() {
-        let entries = parse_catalog(
-            &catalog_document(
-                "io.github.example.lyrnova.tool.example",
-                "example.tar.zst",
-                "v0.1.0",
-            ),
-            &Version::new(0, 1, 0),
-        )
-        .unwrap();
-        assert_eq!(
-            github_release_url(&entries[0]).unwrap().as_str(),
-            "https://github.com/example/lyrnova-example/releases/download/v0.1.0/example.tar.zst"
-        );
-    }
-
     #[test]
     fn embedded_catalog_is_valid_and_empty_until_a_release_is_curated() {
-        assert_eq!(catalog_summaries(), Ok(Vec::new()));
+        assert_eq!(PluginCatalogService::default().summaries(), Ok(Vec::new()));
     }
 
     #[test]
-    fn curated_catalog_rejects_duplicates_mismatches_and_unsafe_tags() {
-        let valid = catalog_document(
-            "io.github.example.lyrnova.tool.example",
-            "example.tar.zst",
-            "v0.1.0",
-        );
-        let mut duplicate: serde_json::Value = serde_json::from_str(&valid).unwrap();
-        let entry = duplicate["entries"][0].clone();
-        duplicate["entries"].as_array_mut().unwrap().push(entry);
+    fn remote_updates_fail_closed_before_network_without_an_official_root_key() {
+        let root = TestDirectory::new();
         assert_eq!(
-            parse_catalog(&duplicate.to_string(), &Version::new(0, 1, 0)),
-            Err(PluginCatalogError::InvalidCatalog)
+            PluginCatalogService::default().update(&root.0),
+            Err(PluginCatalogError::NoTrustedCatalogKeys)
         );
-        assert!(
-            parse_catalog(
-                &catalog_document(
-                    "io.github.example.lyrnova.tool.example",
-                    "example.tar.zst",
-                    "../escape",
-                ),
-                &Version::new(0, 1, 0),
-            )
-            .is_err()
-        );
-        assert!(
-            parse_catalog(
-                &valid.replace(
-                    "\"descriptor\": { \"asset\": \"example.tar.zst\"",
-                    "\"descriptor\": { \"asset\": \"other.tar.zst\"",
-                ),
-                &Version::new(0, 1, 0),
-            )
-            .is_err()
-        );
+        assert!(!root.0.join(CATALOG_DIRECTORY).exists());
     }
 
     #[test]
@@ -500,27 +573,24 @@ mod tests {
         let download = root.0.join(DOWNLOADS_DIRECTORY).join("interrupted");
         fs::create_dir_all(&download).unwrap();
         fs::write(download.join("partial.tar.zst"), b"partial").unwrap();
-
         cleanup_downloads(&root.0);
         assert!(!root.0.join(DOWNLOADS_DIRECTORY).exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn download_staging_rejects_a_symlinked_root() {
+    fn staging_and_cache_reject_symlinked_internal_directories() {
         use std::os::unix::fs::symlink;
 
         let root = TestDirectory::new();
         let outside = root.0.join("outside");
-        let store = root.0.join("store");
         fs::create_dir(&outside).unwrap();
-        fs::create_dir(&store).unwrap();
-        symlink(&outside, store.join(DOWNLOADS_DIRECTORY)).unwrap();
-
+        symlink(&outside, root.0.join(DOWNLOADS_DIRECTORY)).unwrap();
         assert_eq!(
-            create_download_directory(&store),
+            create_private_child_directory(&root.0, DOWNLOADS_DIRECTORY),
             Err(PluginCatalogError::Io)
         );
-        assert!(outside.exists());
+        symlink(&outside, root.0.join(CATALOG_DIRECTORY)).unwrap();
+        assert_eq!(persist_catalog(&root.0, b"{}"), Err(PluginCatalogError::Io));
     }
 }

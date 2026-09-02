@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/w3ti/Lyrnova/blob/main/docs/plugins/catalog-trust.schema.json",
+  "title": "Lyrnova Catalog Root Trust",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "threshold", "keys"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "threshold": { "type": "integer", "minimum": 1, "maximum": 16 },
+    "keys": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["algorithm", "keyId", "publicKey"],
+        "properties": {
+          "algorithm": { "const": "ed25519" },
+          "keyId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "publicKey": { "type": "string", "contentEncoding": "base64" }
+        }
+      }
+    }
+  }
+}

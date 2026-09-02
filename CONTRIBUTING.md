@@ -7,7 +7,8 @@ preferidas.
 ## Preparação
 
 No Linux, instale Rust stable, Node.js 24, GTK 3, WebKitGTK 4.1 e as
-dependências de build do Tauri disponíveis na sua distribuição.
+dependências de build do Tauri disponíveis na sua distribuição. Para executar
+plugins externos, instale também o Bubblewrap (`bwrap`).
 
 ```bash
 npm ci --prefix ui

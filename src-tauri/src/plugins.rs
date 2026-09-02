@@ -10,7 +10,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::plugin_catalog::cleanup_downloads;
+use crate::plugin_catalog::{PluginCatalogService, cleanup_downloads};
 use crate::plugin_manifest::{
     ManifestOrigin, PluginCapability, PluginCompatibility, PluginKind, PluginManifest,
     PluginPermission, parse_manifest, permissions_exactly_match,
@@ -19,6 +19,7 @@ use crate::plugin_package::{
     DiscoveredPluginPackage, InstalledPluginPackage, QuarantinedPluginPackages,
     cleanup_committed_removals, discover_installed_packages,
 };
+use crate::plugin_runtime::ExternalRuntimeSpec;
 
 pub const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
 const PLUGIN_STATE_VERSION: u32 = 4;
@@ -35,6 +36,7 @@ static BUNDLED_CATALOG: OnceLock<Result<Vec<PluginManifest>, PluginError>> = Onc
 struct CatalogPlugin {
     manifest: PluginManifest,
     external_path: Option<PathBuf>,
+    publisher_key_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,8 @@ pub struct PluginSummary {
     pub permissions: Vec<PluginPermission>,
     pub granted_permissions: Vec<PluginPermission>,
     pub requires_permission_review: bool,
+    pub publisher_verified: bool,
+    pub publisher_key_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -124,6 +128,7 @@ impl PluginPreferences {
 #[derive(Debug)]
 pub struct PluginRegistry {
     state: RwLock<PluginRegistryState>,
+    catalog_service: PluginCatalogService,
 }
 
 impl Default for PluginRegistry {
@@ -141,6 +146,7 @@ impl Default for PluginRegistry {
                 catalog,
                 preferences,
             }),
+            catalog_service: PluginCatalogService::default(),
         }
     }
 }
@@ -158,11 +164,23 @@ pub enum PluginError {
     ExternalPackageRollbackFailed,
     PermissionApprovalRequired,
     PermissionDenied,
+    ExternalRuntimeUnsupported,
+    SandboxUnavailable,
+    RuntimeWorkspaceUnavailable,
+    RuntimeStartFailed,
+    RuntimeStopFailed,
     StateUnavailable,
     Io,
 }
 
 impl PluginRegistry {
+    pub(crate) fn with_catalog_service(catalog_service: PluginCatalogService) -> Self {
+        Self {
+            catalog_service,
+            ..Self::default()
+        }
+    }
+
     pub fn load(&self, app: &tauri::AppHandle) {
         let _ = self.reload(app);
     }
@@ -172,7 +190,7 @@ impl PluginRegistry {
         cleanup_downloads(&root);
         cleanup_committed_removals(&root);
         let host_version = host_version()?;
-        let catalog = match load_catalog_from_storage(&root, &host_version) {
+        let catalog = match load_catalog_from_storage(&root, &host_version, &self.catalog_service) {
             Ok(catalog) => catalog,
             Err(error) => {
                 self.fail_closed_external_packages(app)?;
@@ -201,13 +219,14 @@ impl PluginRegistry {
         approved_permissions: &[PluginPermission],
     ) -> Result<Vec<PluginSummary>, PluginError> {
         let root = plugin_storage_root(app)?;
-        let catalog = match load_catalog_from_storage(&root, &host_version()?) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                self.fail_closed_external_packages(app)?;
-                return Err(error);
-            }
-        };
+        let catalog =
+            match load_catalog_from_storage(&root, &host_version()?, &self.catalog_service) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    self.fail_closed_external_packages(app)?;
+                    return Err(error);
+                }
+            };
         let mut state = self
             .state
             .write()
@@ -303,6 +322,33 @@ impl PluginRegistry {
         Ok(())
     }
 
+    pub fn external_runtime_spec(
+        &self,
+        id: &str,
+        require_enabled: bool,
+    ) -> Result<Option<ExternalRuntimeSpec>, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        external_runtime_spec(&state, id, require_enabled)
+    }
+
+    pub fn enabled_external_runtime_specs(&self) -> Result<Vec<ExternalRuntimeSpec>, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        state
+            .catalog
+            .iter()
+            .filter(|plugin| plugin.external_path.is_some())
+            .filter(|plugin| state.preferences.enabled.contains(&plugin.manifest.id))
+            .map(|plugin| external_runtime_spec(&state, &plugin.manifest.id, true))
+            .filter_map(|result| result.transpose())
+            .collect()
+    }
+
     pub fn install(
         &self,
         app: &tauri::AppHandle,
@@ -352,12 +398,13 @@ impl PluginRegistry {
                 installed_path,
             )
             .map_err(map_removal_error)?;
-            let catalog = match load_catalog_from_storage(&root, &host_version()?) {
-                Ok(catalog) => catalog,
-                Err(error) => {
-                    return Err(rollback_external_removal(removal, error, app, &mut state));
-                }
-            };
+            let catalog =
+                match load_catalog_from_storage(&root, &host_version()?, &self.catalog_service) {
+                    Ok(catalog) => catalog,
+                    Err(error) => {
+                        return Err(rollback_external_removal(removal, error, app, &mut state));
+                    }
+                };
             let preferences = normalize_preferences(state.preferences.clone(), &catalog);
             if let Err(error) = write_preferences(app, &preferences) {
                 return Err(rollback_external_removal(removal, error, app, &mut state));
@@ -517,6 +564,7 @@ fn bundled_catalog_entries(manifests: &[PluginManifest]) -> Vec<CatalogPlugin> {
         .map(|manifest| CatalogPlugin {
             manifest,
             external_path: None,
+            publisher_key_id: None,
         })
         .collect()
 }
@@ -524,10 +572,18 @@ fn bundled_catalog_entries(manifests: &[PluginManifest]) -> Vec<CatalogPlugin> {
 fn load_catalog_from_storage(
     root: &Path,
     host_version: &Version,
+    catalog_service: &PluginCatalogService,
 ) -> Result<Vec<CatalogPlugin>, PluginError> {
     let bundled = bundled_catalog()?;
     let packages = discover_installed_packages(root, host_version)
         .map_err(|_| PluginError::InvalidInstalledPackage)?;
+    for package in &packages {
+        if let Some(authentication) = &package.authentication {
+            catalog_service
+                .verify_installed(&package.manifest, &package.descriptor, authentication)
+                .map_err(|_| PluginError::InvalidInstalledPackage)?;
+        }
+    }
     merge_catalog(bundled, packages)
 }
 
@@ -556,9 +612,14 @@ fn merge_catalog(
             }
         }
     }
-    catalog.extend(newest.into_values().map(|package| CatalogPlugin {
-        manifest: package.manifest,
-        external_path: Some(package.path),
+    catalog.extend(newest.into_values().map(|package| {
+        CatalogPlugin {
+            manifest: package.manifest,
+            external_path: Some(package.path),
+            publisher_key_id: package
+                .authentication
+                .map(|authentication| authentication.key_id),
+        }
     }));
     Ok(catalog)
 }
@@ -571,6 +632,44 @@ fn catalog_plugin<'a>(
         .iter()
         .find(|plugin| plugin.manifest.id == id)
         .ok_or(PluginError::UnknownPlugin)
+}
+
+fn external_runtime_spec(
+    state: &PluginRegistryState,
+    id: &str,
+    require_enabled: bool,
+) -> Result<Option<ExternalRuntimeSpec>, PluginError> {
+    let plugin = catalog_plugin(&state.catalog, id)?;
+    if state.preferences.installed.get(id) != Some(&plugin.manifest.version) {
+        return Err(PluginError::NotInstalled);
+    }
+    if require_enabled && !state.preferences.enabled.contains(id) {
+        return Err(PluginError::PluginDisabled);
+    }
+    let granted = state
+        .preferences
+        .grants
+        .get(id)
+        .cloned()
+        .unwrap_or_default();
+    if !permissions_exactly_match(&plugin.manifest.permissions, granted.iter().copied()) {
+        return Err(PluginError::PermissionApprovalRequired);
+    }
+    let Some(package_path) = &plugin.external_path else {
+        return Ok(None);
+    };
+    let crate::plugin_manifest::PluginRuntime::Process { entrypoint, .. } =
+        &plugin.manifest.runtime
+    else {
+        return Err(PluginError::ExternalRuntimeUnsupported);
+    };
+    Ok(Some(ExternalRuntimeSpec {
+        id: plugin.manifest.id.clone(),
+        version: plugin.manifest.version.clone(),
+        package_path: package_path.clone(),
+        entrypoint: entrypoint.clone(),
+        permissions: granted,
+    }))
 }
 
 fn summaries(state: &PluginRegistryState) -> Vec<PluginSummary> {
@@ -614,6 +713,8 @@ fn summaries(state: &PluginRegistryState) -> Vec<PluginSummary> {
                 permissions: manifest.permissions.clone(),
                 granted_permissions,
                 requires_permission_review: installed && !permissions_approved,
+                publisher_verified: plugin.publisher_key_id.is_some(),
+                publisher_key_id: plugin.publisher_key_id.clone(),
             }
         })
         .collect()
@@ -809,6 +910,11 @@ mod tests {
         DiscoveredPluginPackage {
             manifest: parse_manifest(&document, &Version::new(0, 1, 0), ManifestOrigin::External)
                 .unwrap(),
+            descriptor: crate::plugin_package::PluginPackageDescriptor {
+                asset: "external.tar.zst".into(),
+                sha256: "a".repeat(64),
+            },
+            authentication: None,
             path: PathBuf::from(format!("/plugins/external/{version}")),
         }
     }
@@ -923,6 +1029,7 @@ mod tests {
                 catalog,
                 preferences,
             }),
+            catalog_service: PluginCatalogService::default(),
         };
 
         assert_eq!(
@@ -967,6 +1074,57 @@ mod tests {
         assert!(!summary.enabled);
         assert!(!summary.bundled);
         assert!(summary.requires_permission_review);
+    }
+
+    #[test]
+    fn runtime_specs_use_only_exact_persisted_grants() {
+        let catalog = merge_catalog(
+            &load_catalog_from(BUNDLED_MANIFESTS).unwrap(),
+            vec![external_package(
+                "0.1.0",
+                r#"["workspace_read", "process_spawn"]"#,
+            )],
+        )
+        .unwrap();
+        let external = "io.github.example.lyrnova.tool.external";
+        let mut preferences =
+            normalize_preferences(PluginPreferences::defaults(&catalog), &catalog);
+        preferences.grants.insert(
+            external.into(),
+            [
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let state = PluginRegistryState {
+            catalog,
+            preferences,
+        };
+
+        let spec = external_runtime_spec(&state, external, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.id, external);
+        assert_eq!(spec.entrypoint, "bin/external");
+        assert_eq!(spec.permissions.len(), 2);
+        assert_eq!(
+            external_runtime_spec(&state, external, true),
+            Err(PluginError::PluginDisabled)
+        );
+
+        let mut invalid_state = state;
+        invalid_state
+            .preferences
+            .grants
+            .get_mut(external)
+            .unwrap()
+            .remove(&PluginPermission::ProcessSpawn);
+        assert_eq!(
+            external_runtime_spec(&invalid_state, external, false),
+            Err(PluginError::PermissionApprovalRequired)
+        );
     }
 
     #[test]

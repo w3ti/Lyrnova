@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `6eb92c6`
-Estado: instalação, remoção e download curado de pacotes externos implementados e validados.
+Commit-base: `d081f3c`
+Estado: lifecycle sandboxed e catálogo autenticado de plugins implementados e validados.
 
 ## Direção consolidada
 
@@ -51,6 +51,12 @@ Estado: instalação, remoção e download curado de pacotes externos implementa
   para o único staging pendente. O núcleo exige token válido e aprovação exata.
 - Cancelamento e substituição limpam o staging; instalações confirmadas entram no
   catálogo, mas continuam desabilitadas até ativação explícita.
+- O catálogo v2 valida versão, expiração, limiar Ed25519 da raiz e assinaturas
+  delegadas de publishers sobre JSON canônico. Replay, rollback, downgrade,
+  adulteração e chaves revogadas falham fechados antes da persistência atômica.
+- O recibo distingue pacotes locais não autenticados de releases assinadas e a
+  identidade do publisher é revalidada em todo reload. Updates remotos ficam
+  bloqueados até a chave pública raiz oficial ser provisionada no aplicativo.
 - Dados do manifesto são renderizados como texto na interface, sem HTML não confiável.
 - A remoção externa move atomicamente o diretório completo do ID para uma quarentena,
   evitando que versões antigas sejam promovidas após a exclusão.
@@ -67,6 +73,14 @@ Estado: instalação, remoção e download curado de pacotes externos implementa
   privado e limite de 64 MiB durante o streaming; parciais são limpos no reinício.
 - Versões iguais e downgrades são bloqueados antes da rede e novamente sob o lock;
   pacotes baixados passam pela mesma revisão e nascem desabilitados.
+- Broker Linux de runtimes externos usa Bubblewrap obrigatório e falha fechado nas
+  demais plataformas ou quando o sandbox está ausente.
+- Policy engine materializa `workspace_read`, `workspace_write` e `network_access`
+  como mounts/rede do sandbox; ambiente, HOME e secrets permanecem isolados.
+- Entrypoints continuam não executáveis no pacote e recebem cópia privada somente
+  durante a sessão, com limites de recursos e cleanup de lifecycle.
+- Ativação inicia o runtime; desativação, remoção, troca de workspace e encerramento
+  terminam o processo. Falha no reinício desabilita o plugin externo.
 - Licença do código autoral migrada de MIT para `GPL-3.0-only`.
 - Texto integral oficial da GNU GPL versão 3 instalado em `LICENSE`.
 - Metadados Cargo, npm, AppStream e RPM atualizados, sem alterar as licenças das
@@ -89,7 +103,7 @@ Estado: instalação, remoção e download curado de pacotes externos implementa
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace --offline` (87 testes aprovados e 1 teste de integração
+- `cargo test --workspace --offline` (94 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -97,6 +111,11 @@ Estado: instalação, remoção e download curado de pacotes externos implementa
 - `xmllint --noout`
 - `rpmspec -P`
 - `git diff --check`
+
+O smoke test de runtime iniciou e encerrou um processo real no Bubblewrap. O
+contêiner de desenvolvimento permite os namespaces principais com rede concedida,
+mas bloqueia a criação do namespace de rede isolado; a negação de rede foi validada
+pela construção determinística da política e permanece fail-closed no lançamento.
 
 Todas passaram. Em uma validação visual anterior, a área base de configurações foi
 acionada no WebView e também renderizada a partir do bundle local para inspeção em
@@ -114,15 +133,14 @@ dependências e não devem ser substituídas.
 ## Ao retomar
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
-2. implementar execução de runtimes externos sob sandbox e policy engine;
-3. adicionar assinaturas de publishers e atualização autenticada do catálogo;
-4. manter providers de IA opcionais e ausentes da instalação inicial;
-5. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-6. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
+2. conectar o transporte estruturado do protocolo externo por capability;
+3. manter providers de IA opcionais e ausentes da instalação inicial;
+4. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
+5. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
    permissões, empacotamento, sidecar SHA-256, testes e publicação.
 
 ## Estado do repositório
 
-Este checkpoint inclui os fluxos de instalação, remoção e download e os ADRs
-0008, 0009 e 0010. O catálogo dinâmico anterior foi enviado ao GitHub no commit
-`6eb92c6`; nenhum pacote OBS ou release foi realizado.
+O commit `d081f3c` contém os fluxos de instalação, remoção e download. Este
+checkpoint acrescenta o broker sandboxed, o catálogo autenticado e os ADRs 0011
+e 0012; nenhum pacote OBS ou release foi realizado.

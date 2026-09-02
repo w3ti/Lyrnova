@@ -27,7 +27,7 @@ const MAX_ENTRIES: usize = 4_096;
 const MAX_ARCHIVE_PATH_BYTES: usize = 240;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
-const INSTALL_RECEIPT_VERSION: u32 = 1;
+const INSTALL_RECEIPT_VERSION: u32 = 2;
 const INSTALL_RECEIPT_NAME: &str = ".lyrnova-install.json";
 pub(crate) const PACKAGES_DIRECTORY: &str = "packages";
 const REMOVALS_DIRECTORY: &str = ".removals";
@@ -37,6 +37,15 @@ const REMOVALS_DIRECTORY: &str = ".removals";
 pub struct PluginPackageDescriptor {
     pub asset: String,
     pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginPackageAuthentication {
+    pub catalog_version: u64,
+    pub release_tag: String,
+    pub key_id: String,
+    pub signature: String,
 }
 
 impl PluginPackageDescriptor {
@@ -73,6 +82,7 @@ pub struct PluginPackageReview {
     pub package_bytes: u64,
     pub entry_count: usize,
     pub expanded_bytes: u64,
+    pub authentication: Option<PluginPackageAuthentication>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,6 +95,8 @@ pub struct InstalledPluginPackage {
 #[derive(Clone, Debug)]
 pub(crate) struct DiscoveredPluginPackage {
     pub manifest: PluginManifest,
+    pub descriptor: PluginPackageDescriptor,
+    pub authentication: Option<PluginPackageAuthentication>,
     pub path: PathBuf,
 }
 
@@ -96,6 +108,8 @@ struct PluginInstallReceipt {
     plugin_version: Version,
     descriptor: PluginPackageDescriptor,
     content_sha256: String,
+    #[serde(default)]
+    authentication: Option<PluginPackageAuthentication>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -250,6 +264,7 @@ impl PluginPackageInstaller {
             package_bytes: metadata.len(),
             entry_count: extraction.entry_count,
             expanded_bytes: extraction.expanded_bytes,
+            authentication: None,
         };
         let staging_path = cleanup.take();
         Ok(StagedPluginPackage {
@@ -273,6 +288,11 @@ pub struct StagedPluginPackage {
 impl StagedPluginPackage {
     pub fn review(&self) -> &PluginPackageReview {
         &self.review
+    }
+
+    pub(crate) fn authenticate(mut self, authentication: PluginPackageAuthentication) -> Self {
+        self.review.authentication = Some(authentication);
+        self
     }
 
     pub fn install(
@@ -309,6 +329,7 @@ impl StagedPluginPackage {
             plugin_version: self.review.manifest.version.clone(),
             descriptor: self.review.descriptor.clone(),
             content_sha256,
+            authentication: self.review.authentication.clone(),
         };
         write_install_receipt(&self.content_path, &receipt)?;
         sync_directory(&self.content_path)?;
@@ -496,7 +517,8 @@ fn discover_installed_package(
         &fs::read(&receipt_path).map_err(|_| PluginPackageError::InvalidReceipt)?,
     )
     .map_err(|_| PluginPackageError::InvalidReceipt)?;
-    if receipt.version != INSTALL_RECEIPT_VERSION
+    if !matches!(receipt.version, 1 | INSTALL_RECEIPT_VERSION)
+        || (receipt.version == 1 && receipt.authentication.is_some())
         || receipt.plugin_id != expected_id
         || &receipt.plugin_version != expected_version
         || validate_descriptor(&receipt.descriptor).is_err()
@@ -531,6 +553,8 @@ fn discover_installed_package(
     }
     Ok(DiscoveredPluginPackage {
         manifest,
+        descriptor: receipt.descriptor,
+        authentication: receipt.authentication,
         path: path.to_owned(),
     })
 }
@@ -1127,6 +1151,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(staged.review().entry_count, 3);
+        assert_eq!(staged.review().authentication, None);
         assert_eq!(
             staged.review().manifest.permissions,
             [
@@ -1519,9 +1544,16 @@ mod tests {
             PluginPermission::WorkspaceRead,
             PluginPermission::ProcessSpawn,
         ];
+        let authentication = PluginPackageAuthentication {
+            catalog_version: 7,
+            release_tag: "v0.1.0".into(),
+            key_id: "a".repeat(64),
+            signature: "signed-release".into(),
+        };
         let installed = installer(&root)
             .stage_local(&package_path, descriptor(&package_path))
             .unwrap()
+            .authenticate(authentication.clone())
             .install(&approved)
             .unwrap();
 
@@ -1531,6 +1563,7 @@ mod tests {
                 .unwrap();
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].manifest, installed.manifest);
+        assert_eq!(discovered[0].authentication, Some(authentication));
         assert_eq!(discovered[0].path, installed.path);
 
         fs::write(installed.path.join("bin/example"), b"tampered").unwrap();

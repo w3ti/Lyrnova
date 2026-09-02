@@ -19,6 +19,9 @@ path = "src/main.rs"
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+base64 = "=0.22.1"
+ed25519-dalek = "=2.2.0"
+libc = "=0.2.189"
 tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-dialog = "=2.7.3"
 serde = { version = "=1.0.229", features = ["derive"] }

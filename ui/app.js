@@ -366,11 +366,21 @@ function pluginFlowErrorMessage(error) {
     invalid_installed_package: "O pacote instalado falhou na revalidação de segurança.",
     external_package_removal_failed: "Não foi possível mover o pacote para a quarentena de remoção.",
     external_package_rollback_failed: "A remoção falhou e não pôde ser revertida. Plugins externos foram desativados por segurança.",
+    external_runtime_unsupported: "Esta plataforma ainda não possui um sandbox para plugins externos.",
+    sandbox_unavailable: "O sandbox Bubblewrap não está disponível. O plugin permaneceu desabilitado.",
+    runtime_workspace_unavailable: "Este plugin precisa de um workspace ativo para iniciar.",
+    runtime_start_failed: "O runtime isolado não pôde ser iniciado. O plugin permaneceu desabilitado.",
+    runtime_stop_failed: "O processo do plugin não pôde ser encerrado com segurança.",
     invalid_catalog: "O catálogo curado falhou na validação de segurança.",
     unknown_plugin: "O plugin não existe no catálogo curado desta versão do Lyrnova.",
     download_url_denied: "O destino do download não pertence à allowlist de releases do GitHub.",
     download_failed: "Não foi possível baixar o pacote da release confiável.",
     download_too_large: "O download excede o limite de tamanho permitido.",
+    no_trusted_catalog_keys: "A atualização remota está bloqueada até uma chave pública raiz oficial ser provisionada.",
+    catalog_signature_invalid: "A assinatura raiz do catálogo não atingiu o limiar confiável.",
+    publisher_signature_invalid: "A assinatura do publisher é inválida, ausente ou foi revogada.",
+    catalog_expired: "O catálogo remoto expirou e foi recusado.",
+    catalog_rollback: "A atualização foi recusada porque repete ou reduz uma versão confiável.",
     unknown_session: "Esta revisão expirou. Selecione o pacote novamente.",
   })[code] ?? "Não foi possível concluir a operação com o plugin.";
 }
@@ -421,6 +431,9 @@ function renderPluginCatalog(plugins = currentPluginCatalog) {
     const tags = document.createElement("div");
     tags.className = "plugin-card-tags";
     tags.append(createPluginTag(plugin.bundled ? "Embutido" : "Externo", plugin.bundled ? "neutral" : "accent"));
+    if (!plugin.bundled) {
+      tags.append(createPluginTag(plugin.publisherVerified ? "Publisher autenticado" : "Pacote local não autenticado", plugin.publisherVerified ? "success" : "warning"));
+    }
     plugin.permissions.forEach((permission) => tags.append(createPluginTag(pluginPermissionCopy(permission)[0])));
 
     const footer = document.createElement("div");
@@ -488,12 +501,13 @@ function renderTrustedPluginCatalog(entries = currentTrustedPluginCatalog) {
     description.textContent = plugin.description;
     const tags = document.createElement("div");
     tags.className = "plugin-card-tags";
+    tags.append(createPluginTag("Assinatura Ed25519", "success"));
     plugin.permissions.forEach((permission) => tags.append(createPluginTag(pluginPermissionCopy(permission)[0])));
     const footer = document.createElement("div");
     footer.className = "plugin-card-footer";
     const integrity = document.createElement("small");
     integrity.className = "monospace";
-    integrity.textContent = `SHA-256 ${entry.descriptor.sha256.slice(0, 12)}…`;
+    integrity.textContent = `SHA-256 ${entry.descriptor.sha256.slice(0, 12)}… · chave ${entry.publisherKeyId.slice(0, 12)}…`;
     const download = document.createElement("button");
     download.type = "button";
     download.className = "accent-button";
@@ -534,6 +548,13 @@ function showPluginReview(stage) {
   appendReviewMetadata("Conteúdo", `${entryCount} entradas · ${formatBytes(expandedBytes)}`);
   appendReviewMetadata("SHA-256", descriptor.sha256, true);
   appendReviewMetadata("Repositório", manifest.source.repository, true);
+  appendReviewMetadata(
+    "Autenticidade",
+    stage.review.authentication
+      ? `Publisher autenticado · chave ${stage.review.authentication.keyId.slice(0, 16)}…`
+      : "Pacote local sem assinatura de publisher",
+    Boolean(stage.review.authentication),
+  );
 
   pluginPermissionList.replaceChildren();
   manifest.permissions.forEach((permission) => {
@@ -600,6 +621,28 @@ async function downloadPluginPackage(pluginId) {
   } catch (error) {
     setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
     announce("Download de plugin recusado");
+  } finally {
+    pluginMutationRunning = false;
+    if (trigger) trigger.disabled = false;
+  }
+}
+
+async function updatePluginCatalog() {
+  if (!invoke || pluginMutationRunning) return;
+  pluginMutationRunning = true;
+  const trigger = document.querySelector('[data-action="update-plugin-catalog"]');
+  if (trigger) trigger.disabled = true;
+  setPluginInstallStatus("Baixando e autenticando metadados do catálogo…");
+  try {
+    const entries = await invoke("plugin_catalog_update");
+    renderTrustedPluginCatalog(entries);
+    const plugins = await invoke("plugin_list");
+    renderPluginCatalog(plugins);
+    setPluginInstallStatus("Catálogo autenticado e atualizado.", "success");
+    announce("Catálogo de plugins atualizado");
+  } catch (error) {
+    setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
+    announce("Atualização do catálogo recusada");
   } finally {
     pluginMutationRunning = false;
     if (trigger) trigger.disabled = false;
@@ -2132,6 +2175,7 @@ document.addEventListener("click", (event) => {
     if (action === "create-project") openCreateProjectDialog();
     if (action === "close-project-dialog") closeCreateProjectDialog();
     if (action === "select-plugin-package") void selectPluginPackage();
+    if (action === "update-plugin-catalog") void updatePluginCatalog();
     if (action === "cancel-plugin-review") void cancelPluginReview();
     if (action === "cancel-plugin-removal") cancelPluginRemoval();
     if (action === "reset-settings") {

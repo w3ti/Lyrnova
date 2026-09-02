@@ -4,6 +4,8 @@ pub mod git;
 pub mod plugin_catalog;
 pub mod plugin_manifest;
 pub mod plugin_package;
+pub mod plugin_runtime;
+pub mod plugin_trust;
 pub mod plugins;
 pub mod protocol;
 pub mod terminal;
@@ -17,7 +19,7 @@ use std::{fs, process::Command};
 
 use git::{GitError, GitService, GitStatusSummary};
 use plugin_catalog::{
-    PluginCatalogError, TrustedPluginSummary, catalog_summaries, download_release, trusted_release,
+    PluginCatalogError, PluginCatalogService, TrustedPluginSummary, download_release,
 };
 use plugin_manifest::PluginPermission;
 use plugin_manifest::permissions_exactly_match;
@@ -25,6 +27,7 @@ use plugin_package::{
     PluginPackageDescriptor, PluginPackageError, PluginPackageInstaller, PluginPackageReview,
     StagedPluginPackage,
 };
+use plugin_runtime::{PluginRuntimeError, PluginRuntimeService};
 use plugins::{CODEX_PLUGIN_ID, PluginError, PluginRegistry, PluginSummary, plugin_storage_root};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -44,9 +47,10 @@ struct ProjectState(RwLock<Option<ActiveProject>>);
 struct LoginState(Arc<AtomicBool>);
 
 #[derive(Default)]
-struct PluginInstallState {
+struct PluginLifecycleState {
     pending: Mutex<Option<PendingPluginInstall>>,
     mutation: Mutex<()>,
+    runtimes: PluginRuntimeService,
 }
 
 struct PendingPluginInstall {
@@ -197,6 +201,8 @@ fn project_open_dialog(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProjectState>,
     terminal: tauri::State<'_, TerminalService>,
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<Option<ProjectSummary>, WorkspaceError> {
     let Some(selection) = app
         .dialog()
@@ -214,10 +220,16 @@ fn project_open_dialog(
         git: GitService::new(workspace.root()).ok(),
         workspace,
     };
+    let _mutation = plugins.mutation.lock().map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
+    plugins
+        .runtimes
+        .stop_all()
+        .map_err(|_| WorkspaceError::Io)?;
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
     *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
+    start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
 
@@ -261,6 +273,8 @@ fn project_create_dialog(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProjectState>,
     terminal: tauri::State<'_, TerminalService>,
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<Option<ProjectSummary>, WorkspaceError> {
     let name = validated_project_name(&name)?;
     let Some(selection) = app
@@ -300,10 +314,16 @@ fn project_create_dialog(
         git: GitService::new(workspace.root()).ok(),
         workspace,
     };
+    let _mutation = plugins.mutation.lock().map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
+    plugins
+        .runtimes
+        .stop_all()
+        .map_err(|_| WorkspaceError::Io)?;
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
     *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
+    start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
 
@@ -401,13 +421,17 @@ fn plugin_install(
 fn plugin_uninstall(
     plugin_id: String,
     app: tauri::AppHandle,
-    installs: tauri::State<'_, PluginInstallState>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<PluginSummary>, PluginError> {
-    let _mutation = installs
+    let _mutation = plugins
         .mutation
         .lock()
         .map_err(|_| PluginError::StateUnavailable)?;
+    plugins
+        .runtimes
+        .stop(&plugin_id)
+        .map_err(map_runtime_error)?;
     registry.uninstall(&app, &plugin_id)
 }
 
@@ -416,9 +440,74 @@ fn plugin_set_enabled(
     plugin_id: String,
     enabled: bool,
     app: tauri::AppHandle,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+    project: tauri::State<'_, ProjectState>,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<PluginSummary>, PluginError> {
-    registry.set_enabled(&app, &plugin_id, enabled)
+    let _mutation = plugins
+        .mutation
+        .lock()
+        .map_err(|_| PluginError::StateUnavailable)?;
+    if !enabled {
+        let summaries = registry.set_enabled(&app, &plugin_id, false)?;
+        plugins
+            .runtimes
+            .stop(&plugin_id)
+            .map_err(map_runtime_error)?;
+        return Ok(summaries);
+    }
+
+    let spec = registry.external_runtime_spec(&plugin_id, false)?;
+    if let Some(spec) = spec {
+        let workspace =
+            project_snapshot(&project).map(|project| project.workspace.root().to_owned());
+        let root = plugin_storage_root(&app)?;
+        plugins
+            .runtimes
+            .start(&root, spec, workspace.as_deref())
+            .map_err(map_runtime_error)?;
+    }
+    match registry.set_enabled(&app, &plugin_id, true) {
+        Ok(summaries) => Ok(summaries),
+        Err(error) => {
+            let _ = plugins.runtimes.stop(&plugin_id);
+            Err(error)
+        }
+    }
+}
+
+fn map_runtime_error(error: PluginRuntimeError) -> PluginError {
+    match error {
+        PluginRuntimeError::UnsupportedPlatform => PluginError::ExternalRuntimeUnsupported,
+        PluginRuntimeError::SandboxUnavailable => PluginError::SandboxUnavailable,
+        PluginRuntimeError::PermissionDenied => PluginError::PermissionDenied,
+        PluginRuntimeError::WorkspaceUnavailable => PluginError::RuntimeWorkspaceUnavailable,
+        PluginRuntimeError::InvalidPackage => PluginError::InvalidInstalledPackage,
+        PluginRuntimeError::StopFailed => PluginError::RuntimeStopFailed,
+        PluginRuntimeError::RuntimeDirectoryUnavailable
+        | PluginRuntimeError::SpawnFailed
+        | PluginRuntimeError::StateUnavailable => PluginError::RuntimeStartFailed,
+    }
+}
+
+fn start_enabled_external_runtimes(
+    app: &tauri::AppHandle,
+    registry: &PluginRegistry,
+    runtimes: &PluginRuntimeService,
+    workspace: Option<&std::path::Path>,
+) {
+    let Ok(root) = plugin_storage_root(app) else {
+        return;
+    };
+    let Ok(specs) = registry.enabled_external_runtime_specs() else {
+        return;
+    };
+    for spec in specs {
+        let id = spec.id.clone();
+        if runtimes.start(&root, spec, workspace).is_err() {
+            let _ = registry.set_enabled(app, &id, false);
+        }
+    }
 }
 
 #[tauri::command]
@@ -431,9 +520,10 @@ fn plugin_open_repository(
 
 #[tauri::command]
 fn plugin_catalog_list(
+    catalog_service: tauri::State<'_, PluginCatalogService>,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<TrustedPluginSummary>, PluginInstallFlowError> {
-    let mut catalog = catalog_summaries()?;
+    let mut catalog = catalog_service.summaries()?;
     let installed = registry.list()?;
     if catalog.iter().any(|entry| {
         installed
@@ -452,6 +542,36 @@ fn plugin_catalog_list(
         }
     }
     Ok(catalog)
+}
+
+#[tauri::command]
+async fn plugin_catalog_update(
+    app: tauri::AppHandle,
+    catalog_service: tauri::State<'_, PluginCatalogService>,
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+    project: tauri::State<'_, ProjectState>,
+) -> Result<Vec<TrustedPluginSummary>, PluginInstallFlowError> {
+    let root = plugin_storage_root(&app)?;
+    let service = catalog_service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.update(&root))
+        .await
+        .map_err(|_| PluginCatalogError::DownloadFailed)??;
+    let _mutation = plugins
+        .mutation
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    let stop_result = plugins.runtimes.stop_all().map_err(map_runtime_error);
+    registry.reload(&app)?;
+    stop_result?;
+    let workspace = project_snapshot(&project).map(|project| project.workspace.root().to_owned());
+    start_enabled_external_runtimes(
+        &app,
+        registry.inner(),
+        &plugins.runtimes,
+        workspace.as_deref(),
+    );
+    plugin_catalog_list(catalog_service, registry)
 }
 
 fn ensure_trusted_download_available(
@@ -477,7 +597,7 @@ fn ensure_trusted_download_available(
 #[tauri::command]
 fn plugin_package_select(
     app: tauri::AppHandle,
-    state: tauri::State<'_, PluginInstallState>,
+    state: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<Option<PluginInstallReview>, PluginInstallFlowError> {
     let Some(selection) = app
         .dialog()
@@ -522,10 +642,11 @@ fn plugin_package_select(
 async fn plugin_package_download(
     plugin_id: String,
     app: tauri::AppHandle,
-    state: tauri::State<'_, PluginInstallState>,
+    state: tauri::State<'_, PluginLifecycleState>,
     registry: tauri::State<'_, PluginRegistry>,
+    catalog_service: tauri::State<'_, PluginCatalogService>,
 ) -> Result<PluginInstallReview, PluginInstallFlowError> {
-    let release = trusted_release(&plugin_id)?;
+    let release = catalog_service.trusted_release(&plugin_id)?;
     ensure_trusted_download_available(
         registry.inner(),
         &release.manifest.id,
@@ -536,9 +657,17 @@ async fn plugin_package_download(
         .map_err(|_| PluginPackageError::InvalidManifest)?;
     let staged = tauri::async_runtime::spawn_blocking(move || {
         let downloaded = download_release(&root, &release)?;
-        PluginPackageInstaller::new(root, host_version)
+        let staged = PluginPackageInstaller::new(root, host_version)
             .stage_local(downloaded.path(), release.descriptor.clone())
-            .map_err(PluginInstallFlowError::from)
+            .map_err(PluginInstallFlowError::from)?;
+        if staged.review().manifest != release.manifest
+            || staged.review().descriptor != release.descriptor
+        {
+            return Err(PluginInstallFlowError::Catalog(
+                PluginCatalogError::PublisherSignatureInvalid,
+            ));
+        }
+        Ok(staged.authenticate(release.authentication.clone()))
     })
     .await
     .map_err(|_| PluginCatalogError::DownloadFailed)??;
@@ -547,6 +676,13 @@ async fn plugin_package_download(
         .mutation
         .lock()
         .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    if let Some(authentication) = &staged.review().authentication {
+        catalog_service.verify_installed(
+            &staged.review().manifest,
+            &staged.review().descriptor,
+            authentication,
+        )?;
+    }
     ensure_trusted_download_available(
         registry.inner(),
         &staged.review().manifest.id,
@@ -570,8 +706,9 @@ fn plugin_package_confirm(
     token: String,
     approved_permissions: Vec<PluginPermission>,
     app: tauri::AppHandle,
-    installs: tauri::State<'_, PluginInstallState>,
+    installs: tauri::State<'_, PluginLifecycleState>,
     registry: tauri::State<'_, PluginRegistry>,
+    catalog_service: tauri::State<'_, PluginCatalogService>,
 ) -> Result<Vec<PluginSummary>, PluginInstallFlowError> {
     let _mutation = installs
         .mutation
@@ -591,6 +728,13 @@ fn plugin_package_confirm(
     ) {
         return Err(PluginPackageError::PermissionApprovalRequired.into());
     }
+    if let Some(authentication) = &pending.staged.review().authentication {
+        catalog_service.verify_installed(
+            &pending.staged.review().manifest,
+            &pending.staged.review().descriptor,
+            authentication,
+        )?;
+    }
     let staged = current
         .take()
         .ok_or(PluginInstallFlowError::UnknownSession)?
@@ -606,7 +750,7 @@ fn plugin_package_confirm(
 #[tauri::command]
 fn plugin_package_cancel(
     token: String,
-    state: tauri::State<'_, PluginInstallState>,
+    state: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<(), PluginInstallFlowError> {
     let mut current = state
         .pending
@@ -790,17 +934,28 @@ fn require_codex_permissions(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let catalog_service = PluginCatalogService::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ProjectState(RwLock::new(None)))
         .manage(LoginState(Arc::new(AtomicBool::new(false))))
         .manage(ApprovalBroker::default())
-        .manage(PluginRegistry::default())
-        .manage(PluginInstallState::default())
+        .manage(PluginRegistry::with_catalog_service(
+            catalog_service.clone(),
+        ))
+        .manage(catalog_service)
+        .manage(PluginLifecycleState::default())
         .manage(TerminalService::new())
         .setup(|app| {
+            if let Ok(root) = plugin_storage_root(app.handle()) {
+                PluginRuntimeService::cleanup_stale_sessions(&root);
+                let _ = app.state::<PluginCatalogService>().load_cached(&root);
+            }
             app.state::<PluginRegistry>().load(app.handle());
             let workspace = load_last_project(app.handle()).or_else(development_workspace);
+            let workspace_root = workspace
+                .as_ref()
+                .map(|workspace| workspace.root().to_owned());
             if let Some(workspace) = workspace {
                 let project = ActiveProject {
                     git: GitService::new(workspace.root()).ok(),
@@ -810,6 +965,12 @@ pub fn run() {
                     std::io::Error::other("project state lock poisoned during startup")
                 })? = Some(project);
             }
+            start_enabled_external_runtimes(
+                app.handle(),
+                app.state::<PluginRegistry>().inner(),
+                &app.state::<PluginLifecycleState>().runtimes,
+                workspace_root.as_deref(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -829,6 +990,7 @@ pub fn run() {
             plugin_set_enabled,
             plugin_open_repository,
             plugin_catalog_list,
+            plugin_catalog_update,
             plugin_package_select,
             plugin_package_download,
             plugin_package_confirm,
