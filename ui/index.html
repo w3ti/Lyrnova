@@ -85,6 +85,7 @@
             <button type="button" data-settings-target="settings-editor"><span>{ }</span><span><strong>Editor</strong><small>Fonte, minimap e comportamento</small></span></button>
             <button type="button" data-settings-target="settings-terminal"><span>⌘</span><span><strong>Terminal</strong><small>Aparência do terminal integrado</small></span></button>
             <button type="button" data-settings-target="settings-files"><span>▱</span><span><strong>Arquivos</strong><small>Proteção de alterações locais</small></span></button>
+            <button type="button" data-settings-target="settings-plugins"><span>◇</span><span><strong>Plugins</strong><small>Instalação, permissões e estado</small></span></button>
             <button type="button" data-settings-target="settings-planned"><span>＋</span><span><strong>Planejadas</strong><small>Próximas opções do IDE</small></span></button>
           </nav>
           <p class="settings-sidebar-note">As preferências são locais e entram em vigor imediatamente.</p>
@@ -153,6 +154,15 @@
                 <label class="setting-row setting-toggle"><span><strong>Confirmar ao descartar alterações</strong><small>Pede confirmação antes de fechar uma aba modificada.</small></span><input type="checkbox" data-setting="confirmDirtyClose" role="switch"></label>
               </section>
 
+              <section class="settings-section" id="settings-plugins" aria-labelledby="settings-plugins-title">
+                <div class="settings-section-heading plugin-section-heading"><span class="settings-section-icon">◇</span><div><h2 id="settings-plugins-title">Plugins</h2><p>Revise origem e autoridade antes de instalar código externo.</p></div><button class="accent-button" type="button" data-action="select-plugin-package">Instalar pacote local</button></div>
+                <div class="plugin-install-guide"><span aria-hidden="true">i</span><p>Selecione um arquivo <code>.tar.zst</code>. O descritor <code>&lt;arquivo&gt;.json</code> com o SHA-256 esperado deve estar na mesma pasta.</p></div>
+                <p class="plugin-install-status" id="plugin-install-status" role="status" hidden></p>
+                <div class="plugin-list" id="plugin-list" aria-live="polite"><p class="plugin-list-empty">Carregando catálogo local…</p></div>
+                <div class="trusted-plugin-heading"><div><h3>Catálogo curado</h3><p>Pacotes aprovados pelo projeto, baixados de GitHub Releases e verificados por SHA-256.</p></div><span>Embarcado</span></div>
+                <div class="plugin-list trusted-plugin-list" id="trusted-plugin-list" aria-live="polite"><p class="plugin-list-empty">Carregando catálogo curado…</p></div>
+              </section>
+
               <section class="settings-section planned-settings" id="settings-planned" aria-labelledby="settings-planned-title">
                 <div class="settings-section-heading"><span class="settings-section-icon">＋</span><div><h2 id="settings-planned-title">Próximas configurações sugeridas</h2><p>Opções recomendadas para evoluir o ambiente.</p></div></div>
                 <div class="planned-grid">
@@ -161,7 +171,7 @@
                   <article><strong>Salvar e formatar</strong><p>Auto save, format on save e formatter por linguagem.</p><span>Planejada</span></article>
                   <article><strong>Terminal e shell</strong><p>Shell padrão, perfis, ambiente e diretório inicial.</p><span>Planejada</span></article>
                   <article><strong>Git</strong><p>Identidade, assinatura, fetch e confirmações de operações.</p><span>Planejada</span></article>
-                  <article><strong>Plugins e privacidade</strong><p>Atualizações, permissões, rede e dados compartilhados.</p><span>Planejada</span></article>
+                  <article><strong>Assinaturas e atualizações de plugins</strong><p>Identidade criptográfica de publishers e atualização assistida.</p><span>Planejada</span></article>
                 </div>
               </section>
             </div>
@@ -305,6 +315,36 @@
         <label class="project-check"><input id="new-project-git" type="checkbox" checked><span>Inicializar repositório Git</span></label>
         <p class="integration-note" id="project-create-note" hidden></p>
         <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="close-project-dialog">Cancelar</button><button class="accent-button" type="submit">Escolher local e criar</button></div>
+      </form>
+    </dialog>
+    <dialog class="account-dialog plugin-review-dialog" id="plugin-review-dialog" aria-labelledby="plugin-review-title">
+      <form id="plugin-review-form">
+        <div class="dialog-heading">
+          <span class="account-mark" aria-hidden="true">◇</span>
+          <div><p class="eyebrow">Pacote externo</p><h2 id="plugin-review-title">Revisar plugin</h2></div>
+          <button class="icon-button" type="button" data-action="cancel-plugin-review" aria-label="Cancelar instalação">×</button>
+        </div>
+        <p class="dialog-copy" id="plugin-review-description"></p>
+        <dl class="plugin-review-metadata" id="plugin-review-metadata"></dl>
+        <section class="plugin-review-authority" aria-labelledby="plugin-permissions-title">
+          <div><h3 id="plugin-permissions-title">Permissões obrigatórias</h3><p>Todas precisam ser aceitas para instalar. O plugin continuará desabilitado.</p></div>
+          <div class="plugin-permission-list" id="plugin-permission-list"></div>
+        </section>
+        <p class="integration-note" id="plugin-review-note" hidden></p>
+        <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-plugin-review">Cancelar</button><button class="accent-button" id="plugin-review-confirm" type="submit">Instalar desabilitado</button></div>
+      </form>
+    </dialog>
+    <dialog class="account-dialog plugin-remove-dialog" id="plugin-remove-dialog" aria-labelledby="plugin-remove-title">
+      <form id="plugin-remove-form">
+        <div class="dialog-heading">
+          <span class="account-mark plugin-remove-mark" aria-hidden="true">×</span>
+          <div><p class="eyebrow">Remover pacote externo</p><h2 id="plugin-remove-title">Remover plugin</h2></div>
+          <button class="icon-button" type="button" data-action="cancel-plugin-removal" aria-label="Cancelar remoção">×</button>
+        </div>
+        <p class="dialog-copy" id="plugin-remove-description"></p>
+        <div class="plugin-remove-warning"><strong>Esta ação remove todas as versões locais.</strong><p>O plugin será desabilitado, suas permissões serão revogadas e os arquivos instalados serão excluídos.</p></div>
+        <p class="integration-note" id="plugin-remove-note" hidden></p>
+        <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-plugin-removal">Cancelar</button><button class="danger-button" id="plugin-remove-confirm" type="submit">Remover plugin</button></div>
       </form>
     </dialog>
     <div class="sr-status visually-hidden" id="sr-status" role="status" aria-live="polite"></div>

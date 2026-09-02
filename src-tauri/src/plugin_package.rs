@@ -19,22 +19,50 @@ use crate::plugin_manifest::{
     permissions_exactly_match,
 };
 
-const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_STREAM_BYTES: u64 = 300 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4_096;
 const MAX_ARCHIVE_PATH_BYTES: usize = 240;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
+const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const INSTALL_RECEIPT_VERSION: u32 = 1;
 const INSTALL_RECEIPT_NAME: &str = ".lyrnova-install.json";
 pub(crate) const PACKAGES_DIRECTORY: &str = "packages";
+const REMOVALS_DIRECTORY: &str = ".removals";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginPackageDescriptor {
     pub asset: String,
     pub sha256: String,
+}
+
+impl PluginPackageDescriptor {
+    pub fn read_sidecar(path: &Path) -> Result<Self, PluginPackageError> {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| PluginPackageError::DescriptorUnavailable)?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_DESCRIPTOR_BYTES {
+            return Err(PluginPackageError::InvalidDescriptor);
+        }
+        let file = File::open(path).map_err(|_| PluginPackageError::DescriptorUnavailable)?;
+        let mut contents = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_DESCRIPTOR_BYTES + 1)
+            .read_to_end(&mut contents)
+            .map_err(|_| PluginPackageError::DescriptorUnavailable)?;
+        if contents.len() as u64 > MAX_DESCRIPTOR_BYTES {
+            return Err(PluginPackageError::InvalidDescriptor);
+        }
+        let descriptor: Self =
+            serde_json::from_slice(&contents).map_err(|_| PluginPackageError::InvalidDescriptor)?;
+        validate_descriptor(&descriptor)?;
+        Ok(descriptor)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), PluginPackageError> {
+        validate_descriptor(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -74,6 +102,7 @@ struct PluginInstallReceipt {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum PluginPackageError {
     InvalidDescriptor,
+    DescriptorUnavailable,
     PackageUnavailable,
     PackageNotRegularFile,
     PackageTooLarge,
@@ -97,6 +126,8 @@ pub enum PluginPackageError {
     InvalidReceipt,
     InvalidInstallLayout,
     ContentIntegrityMismatch,
+    InvalidRemovalTarget,
+    RemovalRollbackFailed,
     StateUnavailable,
     Io,
 }
@@ -290,6 +321,110 @@ impl StagedPluginPackage {
             enabled: false,
         })
     }
+}
+
+pub(crate) struct QuarantinedPluginPackages {
+    original_path: PathBuf,
+    quarantine_path: Option<PathBuf>,
+    packages_root: PathBuf,
+    removals_root: PathBuf,
+}
+
+impl QuarantinedPluginPackages {
+    pub(crate) fn begin(
+        root: &Path,
+        plugin_id: &str,
+        plugin_version: &Version,
+        installed_path: &Path,
+    ) -> Result<Self, PluginPackageError> {
+        let packages_root = root.join(PACKAGES_DIRECTORY);
+        let original_path = packages_root.join(plugin_id);
+        let expected_version_path = original_path.join(plugin_version.to_string());
+        if installed_path != expected_version_path {
+            return Err(PluginPackageError::InvalidRemovalTarget);
+        }
+        let metadata = fs::symlink_metadata(&original_path)
+            .map_err(|_| PluginPackageError::InvalidRemovalTarget)?;
+        if !metadata.file_type().is_dir() {
+            return Err(PluginPackageError::InvalidRemovalTarget);
+        }
+
+        let removals_root = root.join(REMOVALS_DIRECTORY);
+        match fs::symlink_metadata(&removals_root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_private_dir(&removals_root)?;
+            }
+            Err(_) => return Err(PluginPackageError::Io),
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                set_private_dir_permissions(&removals_root)?;
+            }
+            Ok(_) => return Err(PluginPackageError::InvalidRemovalTarget),
+        }
+        let quarantine_path = removals_root.join(Uuid::new_v4().simple().to_string());
+        fs::rename(&original_path, &quarantine_path).map_err(|_| PluginPackageError::Io)?;
+        if sync_directory(&packages_root).is_err() || sync_directory(&removals_root).is_err() {
+            if fs::rename(&quarantine_path, &original_path).is_err() {
+                return Err(PluginPackageError::RemovalRollbackFailed);
+            }
+            let _ = sync_directory(&packages_root);
+            return Err(PluginPackageError::Io);
+        }
+
+        Ok(Self {
+            original_path,
+            quarantine_path: Some(quarantine_path),
+            packages_root,
+            removals_root,
+        })
+    }
+
+    pub(crate) fn rollback(mut self) -> Result<(), PluginPackageError> {
+        let quarantine_path = self
+            .quarantine_path
+            .take()
+            .ok_or(PluginPackageError::RemovalRollbackFailed)?;
+        fs::rename(&quarantine_path, &self.original_path)
+            .map_err(|_| PluginPackageError::RemovalRollbackFailed)?;
+        sync_directory(&self.packages_root)
+            .map_err(|_| PluginPackageError::RemovalRollbackFailed)?;
+        remove_empty_directory(&self.removals_root);
+        Ok(())
+    }
+
+    pub(crate) fn commit(mut self) {
+        let Some(quarantine_path) = self.quarantine_path.take() else {
+            return;
+        };
+        let _ = fs::remove_dir_all(quarantine_path);
+        remove_empty_directory(&self.removals_root);
+    }
+}
+
+impl Drop for QuarantinedPluginPackages {
+    fn drop(&mut self) {
+        let Some(quarantine_path) = self.quarantine_path.take() else {
+            return;
+        };
+        let _ = fs::rename(quarantine_path, &self.original_path);
+        let _ = sync_directory(&self.packages_root);
+        remove_empty_directory(&self.removals_root);
+    }
+}
+
+pub(crate) fn cleanup_committed_removals(root: &Path) {
+    let removals_root = root.join(REMOVALS_DIRECTORY);
+    let Ok(metadata) = fs::symlink_metadata(&removals_root) else {
+        return;
+    };
+    if metadata.file_type().is_dir() {
+        let _ = fs::remove_dir_all(removals_root);
+    } else {
+        let _ = fs::remove_file(removals_root);
+    }
+}
+
+fn remove_empty_directory(path: &Path) {
+    let _ = fs::remove_dir(path);
 }
 
 pub(crate) fn discover_installed_packages(
@@ -1085,6 +1220,33 @@ mod tests {
     }
 
     #[test]
+    fn reads_only_a_small_regular_valid_descriptor_sidecar() {
+        let root = TestDirectory::new();
+        let sidecar = root.path().join("example.tar.zst.json");
+        let expected = PluginPackageDescriptor {
+            asset: "example.tar.zst".into(),
+            sha256: "a".repeat(64),
+        };
+        fs::write(&sidecar, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert_eq!(
+            PluginPackageDescriptor::read_sidecar(&sidecar),
+            Ok(expected)
+        );
+
+        fs::write(&sidecar, br#"{"asset":"../escape.tar.zst","sha256":"bad"}"#).unwrap();
+        assert_eq!(
+            PluginPackageDescriptor::read_sidecar(&sidecar),
+            Err(PluginPackageError::InvalidDescriptor)
+        );
+
+        fs::write(&sidecar, vec![b' '; MAX_DESCRIPTOR_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            PluginPackageDescriptor::read_sidecar(&sidecar),
+            Err(PluginPackageError::InvalidDescriptor)
+        );
+    }
+
+    #[test]
     fn rejects_traversal_links_and_duplicate_entries() {
         let root = TestDirectory::new();
         for (suffix, hostile, expected_error) in [
@@ -1244,6 +1406,109 @@ mod tests {
             Err(PluginPackageError::AlreadyInstalled)
         );
         assert_eq!(staging_entry_count(&root), 0);
+    }
+
+    #[test]
+    fn external_removal_quarantines_every_version_and_supports_rollback() {
+        let root = TestDirectory::new();
+        let package_path = write_package(root.path(), ASSET, valid_entries());
+        let installed = installer(&root)
+            .stage_local(&package_path, descriptor(&package_path))
+            .unwrap()
+            .install(&[
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ])
+            .unwrap();
+        let store = root.path().join("store");
+        let plugin_root = installed.path.parent().unwrap().to_owned();
+        let older_version = plugin_root.join("0.0.9");
+        fs::create_dir(&older_version).unwrap();
+        fs::write(older_version.join("legacy"), b"old").unwrap();
+
+        let removal = QuarantinedPluginPackages::begin(
+            &store,
+            &installed.manifest.id,
+            &installed.manifest.version,
+            &installed.path,
+        )
+        .unwrap();
+        assert!(!plugin_root.exists());
+        drop(removal);
+        assert!(installed.path.exists());
+        assert!(older_version.exists());
+
+        let removal = QuarantinedPluginPackages::begin(
+            &store,
+            &installed.manifest.id,
+            &installed.manifest.version,
+            &installed.path,
+        )
+        .unwrap();
+        removal.commit();
+        assert!(!plugin_root.exists());
+        assert!(!store.join(REMOVALS_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn startup_cleanup_finishes_an_interrupted_committed_removal() {
+        let root = TestDirectory::new();
+        let package_path = write_package(root.path(), ASSET, valid_entries());
+        let installed = installer(&root)
+            .stage_local(&package_path, descriptor(&package_path))
+            .unwrap()
+            .install(&[
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ])
+            .unwrap();
+        let store = root.path().join("store");
+        let removal = QuarantinedPluginPackages::begin(
+            &store,
+            &installed.manifest.id,
+            &installed.manifest.version,
+            &installed.path,
+        )
+        .unwrap();
+        std::mem::forget(removal);
+
+        assert!(store.join(REMOVALS_DIRECTORY).is_dir());
+        cleanup_committed_removals(&store);
+        assert!(!store.join(REMOVALS_DIRECTORY).exists());
+        assert!(!installed.path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_removal_rejects_a_symlinked_quarantine() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDirectory::new();
+        let package_path = write_package(root.path(), ASSET, valid_entries());
+        let installed = installer(&root)
+            .stage_local(&package_path, descriptor(&package_path))
+            .unwrap()
+            .install(&[
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ])
+            .unwrap();
+        let store = root.path().join("store");
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, store.join(REMOVALS_DIRECTORY)).unwrap();
+
+        assert!(matches!(
+            QuarantinedPluginPackages::begin(
+                &store,
+                &installed.manifest.id,
+                &installed.manifest.version,
+                &installed.path,
+            ),
+            Err(PluginPackageError::InvalidRemovalTarget)
+        ));
+        assert!(installed.path.exists());
+        assert!(outside.exists());
     }
 
     #[test]

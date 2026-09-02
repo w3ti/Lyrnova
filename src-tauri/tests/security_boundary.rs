@@ -124,6 +124,27 @@ fn initial_shell_is_an_ide_without_ai_controls() {
 }
 
 #[test]
+fn plugin_installation_requires_an_explicit_local_review() {
+    let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
+        .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
+
+    assert!(html.contains("data-action=\"select-plugin-package\""));
+    assert!(html.contains("id=\"plugin-review-dialog\""));
+    assert!(html.contains("Instalar desabilitado"));
+    assert!(javascript.contains("invoke(\"plugin_package_select\")"));
+    assert!(javascript.contains("invoke(\"plugin_package_confirm\""));
+    assert!(javascript.contains("invoke(\"plugin_package_cancel\""));
+    assert!(html.contains("id=\"plugin-remove-dialog\""));
+    assert!(javascript.contains("invoke(\"plugin_uninstall\""));
+    assert!(html.contains("id=\"trusted-plugin-list\""));
+    assert!(javascript.contains("invoke(\"plugin_catalog_list\""));
+    assert!(javascript.contains("invoke(\"plugin_package_download\""));
+    assert!(javascript.contains("approvedPermissions"));
+}
+
+#[test]
 fn local_workspace_has_no_remote_resources() {
     let ui_dir = manifest_dir().join("../ui");
     for name in ["index.html", "styles.css", "app.js"] {

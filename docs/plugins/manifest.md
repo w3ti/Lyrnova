@@ -37,6 +37,13 @@ ao arquivo selecionado e ao manifesto antes de aceitar o pacote.
 O formato desse documento separado está em
 [`plugin-package-descriptor.schema.json`](plugin-package-descriptor.schema.json).
 
+O catálogo curado v1 é embarcado no aplicativo e validado antes de ser exibido.
+Cada entrada liga manifesto, descritor e tag de uma GitHub Release; a URL do asset
+é derivada pelo núcleo e nunca fornecida pelo frontend. O formato está em
+[`plugin-catalog.schema.json`](plugin-catalog.schema.json). O catálogo distribuído
+permanece vazio até existir uma release real revisada, evitando exemplos baixáveis
+ou hashes fictícios.
+
 A origem do documento é fornecida separadamente ao parser: um pacote externo
 não pode se declarar `bundled` para evitar a verificação de integridade ou obter
 o selo de plugin oficial.
@@ -65,8 +72,28 @@ limita o pacote comprimido, o fluxo descomprimido, cada arquivo, o total
 extraído e a quantidade de entradas; recusa traversal, paths não UTF-8, links,
 tipos especiais e entradas duplicadas. Depois valida novamente o manifesto e
 confere a existência do entrypoint. A instalação só ocorre após aprovação
-exata das permissões, por rename atômico, e permanece desabilitada. Download,
-remoção física e execução externa ainda não estão conectados.
+exata das permissões, por rename atômico, e permanece desabilitada.
+
+Na instalação local, o seletor nativo recebe `exemplo.tar.zst` e procura
+`exemplo.tar.zst.json` na mesma pasta. O frontend recebe manifesto, descritor e
+métricas para revisão, mas não recebe nem fornece paths. A confirmação usa um
+token efêmero mantido pelo núcleo e repete a comparação exata das permissões
+antes de consumir o staging. Cancelamento, nova seleção ou encerramento do
+aplicativo descartam o staging pendente.
+
+A remoção física está conectada apenas para plugins externos. Ela move por rename
+atômico o diretório completo do ID para uma quarentena fora do catálogo, revoga
+habilitação e concessões e persiste o novo catálogo antes da limpeza. Falhas de
+persistência restauram o diretório; uma interrupção depois do rename é concluída
+na próxima inicialização. Todas as versões são removidas juntas para impedir que
+uma versão antiga reapareça silenciosamente.
+
+Downloads do catálogo curado estão conectados pelo núcleo Rust. Eles aceitam apenas
+um ID, usam HTTPS com redirects limitados a hosts de releases do GitHub, impõem o
+limite de 64 MiB durante o streaming e gravam em diretório privado e temporário.
+Versões iguais e downgrades são recusados antes e depois da rede. O pacote baixado
+segue pelo mesmo staging, revisão e instalação desabilitada do fluxo local. Execução
+externa continua não conectada.
 
 Na reinicialização, o catálogo externo é reconstruído apenas de instalações com
 recibo válido. O núcleo recalcula o SHA-256 da árvore, incluindo paths, tipos,

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/w3ti/Lyrnova/blob/main/docs/plugins/plugin-catalog.schema.json",
+  "title": "Lyrnova Curated Plugin Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["manifest", "descriptor", "releaseTag"],
+        "properties": {
+          "manifest": { "$ref": "plugin-manifest.schema.json" },
+          "descriptor": { "$ref": "plugin-package-descriptor.schema.json" },
+          "releaseTag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `fe3c314`
-Estado: catálogo dinâmico de plugins externos implementado localmente; alterações ainda não commitadas.
+Commit-base: `6eb92c6`
+Estado: instalação, remoção e download curado de pacotes externos implementados e validados.
 
 ## Direção consolidada
 
@@ -44,6 +44,29 @@ Estado: catálogo dinâmico de plugins externos implementado localmente; altera�
   habilitação até nova revisão; aprovação externa pode ser persistida sem ativação.
 - Alterações de instalação, remoção e habilitação só entram em memória depois de a
   persistência ser concluída.
+- Configurações agora listam o catálogo real e permitem selecionar um `.tar.zst`
+  por diálogo nativo, revisar manifesto, integridade e permissões e confirmar ou
+  cancelar a instalação.
+- O frontend não envia paths de pacote: recebe uma revisão tipada e um token opaco
+  para o único staging pendente. O núcleo exige token válido e aprovação exata.
+- Cancelamento e substituição limpam o staging; instalações confirmadas entram no
+  catálogo, mas continuam desabilitadas até ativação explícita.
+- Dados do manifesto são renderizados como texto na interface, sem HTML não confiável.
+- A remoção externa move atomicamente o diretório completo do ID para uma quarentena,
+  evitando que versões antigas sejam promovidas após a exclusão.
+- Catálogo, habilitação e concessões são persistidos antes da limpeza; falha restaura
+  o pacote, e falha de rollback remove toda autoridade externa da memória.
+- Instalação e remoção usam o mesmo lock global, e resíduos de uma interrupção são
+  limpos antes da descoberta na próxima inicialização.
+- A interface oferece remoção somente para plugins externos e exige confirmação.
+- Catálogo v1 estrito e embarcado adicionado como raiz de confiança para downloads;
+  ele começa vazio até uma release real ser revisada.
+- O frontend solicita download apenas por ID. URL de GitHub Release, tag, descritor,
+  hash e destino permanecem sob controle do núcleo Rust.
+- Downloads HTTPS verificam allowlist em cada redirect, usam timeout, diretório
+  privado e limite de 64 MiB durante o streaming; parciais são limpos no reinício.
+- Versões iguais e downgrades são bloqueados antes da rede e novamente sob o lock;
+  pacotes baixados passam pela mesma revisão e nascem desabilitados.
 - Licença do código autoral migrada de MIT para `GPL-3.0-only`.
 - Texto integral oficial da GNU GPL versão 3 instalado em `LICENSE`.
 - Metadados Cargo, npm, AppStream e RPM atualizados, sem alterar as licenças das
@@ -66,7 +89,7 @@ Estado: catálogo dinâmico de plugins externos implementado localmente; altera�
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace --offline` (74 testes aprovados e 1 teste de integração
+- `cargo test --workspace --offline` (87 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -75,7 +98,7 @@ Estado: catálogo dinâmico de plugins externos implementado localmente; altera�
 - `rpmspec -P`
 - `git diff --check`
 
-Todas passaram. O build mais recente foi aberto no Tauri; a área de configurações foi
+Todas passaram. Em uma validação visual anterior, a área base de configurações foi
 acionada no WebView e também renderizada a partir do bundle local para inspeção em
 1600 × 1000. Hierarquia, espaçamento, contraste, controles e convivência com o painel
 do terminal foram revisados sem defeitos visuais bloqueantes.
@@ -91,15 +114,15 @@ dependências e não devem ser substituídas.
 ## Ao retomar
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
-2. adicionar commands Tauri e interface para selecionar pacote, revisar manifesto e
-   permissões e confirmar ou cancelar o staging;
-3. implementar remoção física transacional de pacotes externos;
-4. implementar download somente depois, com descritor vindo de catálogo confiável;
-5. manter providers de IA opcionais e ausentes da instalação inicial;
-6. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita.
+2. implementar execução de runtimes externos sob sandbox e policy engine;
+3. adicionar assinaturas de publishers e atualização autenticada do catálogo;
+4. manter providers de IA opcionais e ausentes da instalação inicial;
+5. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
+6. criar um manual para terceiros desenvolverem plugins, cobrindo manifesto,
+   permissões, empacotamento, sidecar SHA-256, testes e publicação.
 
 ## Estado do repositório
 
-Há alterações locais não commitadas do catálogo dinâmico e um ADR novo ainda não
-rastreado. Eles devem ser preservados. Nenhum push, pacote OBS ou release foi
-realizado neste ponto.
+Este checkpoint inclui os fluxos de instalação, remoção e download e os ADRs
+0008, 0009 e 0010. O catálogo dinâmico anterior foi enviado ao GitHub no commit
+`6eb92c6`; nenhum pacote OBS ou release foi realizado.

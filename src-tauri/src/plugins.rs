@@ -10,12 +10,14 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::plugin_catalog::cleanup_downloads;
 use crate::plugin_manifest::{
     ManifestOrigin, PluginCapability, PluginCompatibility, PluginKind, PluginManifest,
     PluginPermission, parse_manifest, permissions_exactly_match,
 };
 use crate::plugin_package::{
-    DiscoveredPluginPackage, InstalledPluginPackage, discover_installed_packages,
+    DiscoveredPluginPackage, InstalledPluginPackage, QuarantinedPluginPackages,
+    cleanup_committed_removals, discover_installed_packages,
 };
 
 pub const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
@@ -152,7 +154,8 @@ pub enum PluginError {
     InvalidManifest,
     DuplicatePlugin,
     InvalidInstalledPackage,
-    ExternalPackageRemovalRequired,
+    ExternalPackageRemovalFailed,
+    ExternalPackageRollbackFailed,
     PermissionApprovalRequired,
     PermissionDenied,
     StateUnavailable,
@@ -166,6 +169,8 @@ impl PluginRegistry {
 
     pub fn reload(&self, app: &tauri::AppHandle) -> Result<Vec<PluginSummary>, PluginError> {
         let root = plugin_storage_root(app)?;
+        cleanup_downloads(&root);
+        cleanup_committed_removals(&root);
         let host_version = host_version()?;
         let catalog = match load_catalog_from_storage(&root, &host_version) {
             Ok(catalog) => catalog,
@@ -334,14 +339,38 @@ impl PluginRegistry {
             .state
             .write()
             .map_err(|_| PluginError::StateUnavailable)?;
-        let plugin = catalog_plugin(&state.catalog, id)?;
-        if plugin.external_path.is_some() {
-            return Err(PluginError::ExternalPackageRemovalRequired);
-        }
-        let mut next = state.preferences.clone();
-        if next.installed.remove(id).is_none() {
+        let plugin = catalog_plugin(&state.catalog, id)?.clone();
+        if state.preferences.installed.get(id) != Some(&plugin.manifest.version) {
             return Err(PluginError::NotInstalled);
         }
+        if let Some(installed_path) = &plugin.external_path {
+            let root = plugin_storage_root(app)?;
+            let removal = QuarantinedPluginPackages::begin(
+                &root,
+                id,
+                &plugin.manifest.version,
+                installed_path,
+            )
+            .map_err(map_removal_error)?;
+            let catalog = match load_catalog_from_storage(&root, &host_version()?) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    return Err(rollback_external_removal(removal, error, app, &mut state));
+                }
+            };
+            let preferences = normalize_preferences(state.preferences.clone(), &catalog);
+            if let Err(error) = write_preferences(app, &preferences) {
+                return Err(rollback_external_removal(removal, error, app, &mut state));
+            }
+            *state = PluginRegistryState {
+                catalog,
+                preferences,
+            };
+            removal.commit();
+            return Ok(summaries(&state));
+        }
+        let mut next = state.preferences.clone();
+        next.installed.remove(id);
         next.enabled.remove(id);
         next.grants.remove(id);
         write_preferences(app, &next)?;
@@ -419,6 +448,40 @@ impl PluginRegistry {
             .map(|_| ())
             .map_err(|_| PluginError::Io)
     }
+}
+
+fn map_removal_error(error: crate::plugin_package::PluginPackageError) -> PluginError {
+    match error {
+        crate::plugin_package::PluginPackageError::InvalidRemovalTarget => {
+            PluginError::InvalidInstalledPackage
+        }
+        crate::plugin_package::PluginPackageError::RemovalRollbackFailed => {
+            PluginError::ExternalPackageRollbackFailed
+        }
+        _ => PluginError::ExternalPackageRemovalFailed,
+    }
+}
+
+fn rollback_external_removal(
+    removal: QuarantinedPluginPackages,
+    original_error: PluginError,
+    app: &tauri::AppHandle,
+    state: &mut PluginRegistryState,
+) -> PluginError {
+    if removal.rollback().is_ok() {
+        return original_error;
+    }
+
+    let catalog = bundled_catalog()
+        .map(bundled_catalog_entries)
+        .unwrap_or_default();
+    let preferences = normalize_preferences(state.preferences.clone(), &catalog);
+    *state = PluginRegistryState {
+        catalog,
+        preferences: preferences.clone(),
+    };
+    let _ = write_preferences(app, &preferences);
+    PluginError::ExternalPackageRollbackFailed
 }
 
 fn bundled_catalog() -> Result<&'static [PluginManifest], PluginError> {
@@ -642,7 +705,7 @@ fn record_external_install(
     Ok(preferences)
 }
 
-fn plugin_storage_root(app: &tauri::AppHandle) -> Result<PathBuf, PluginError> {
+pub(crate) fn plugin_storage_root(app: &tauri::AppHandle) -> Result<PathBuf, PluginError> {
     app.path()
         .app_config_dir()
         .map(|directory| directory.join("plugins"))

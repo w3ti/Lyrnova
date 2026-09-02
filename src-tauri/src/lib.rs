@@ -1,6 +1,7 @@
 pub mod app_server;
 pub mod backend;
 pub mod git;
+pub mod plugin_catalog;
 pub mod plugin_manifest;
 pub mod plugin_package;
 pub mod plugins;
@@ -9,14 +10,22 @@ pub mod terminal;
 pub mod workspace;
 
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::{fs, process::Command};
 
 use git::{GitError, GitService, GitStatusSummary};
+use plugin_catalog::{
+    PluginCatalogError, TrustedPluginSummary, catalog_summaries, download_release, trusted_release,
+};
 use plugin_manifest::PluginPermission;
-use plugins::{CODEX_PLUGIN_ID, PluginError, PluginRegistry, PluginSummary};
+use plugin_manifest::permissions_exactly_match;
+use plugin_package::{
+    PluginPackageDescriptor, PluginPackageError, PluginPackageInstaller, PluginPackageReview,
+    StagedPluginPackage,
+};
+use plugins::{CODEX_PLUGIN_ID, PluginError, PluginRegistry, PluginSummary, plugin_storage_root};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -33,6 +42,52 @@ struct ActiveProject {
 
 struct ProjectState(RwLock<Option<ActiveProject>>);
 struct LoginState(Arc<AtomicBool>);
+
+#[derive(Default)]
+struct PluginInstallState {
+    pending: Mutex<Option<PendingPluginInstall>>,
+    mutation: Mutex<()>,
+}
+
+struct PendingPluginInstall {
+    token: String,
+    staged: StagedPluginPackage,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstallReview {
+    token: String,
+    review: PluginPackageReview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "domain", content = "error", rename_all = "snake_case")]
+enum PluginInstallFlowError {
+    Catalog(PluginCatalogError),
+    Package(PluginPackageError),
+    Registry(PluginError),
+    UnknownSession,
+    StateUnavailable,
+}
+
+impl From<PluginPackageError> for PluginInstallFlowError {
+    fn from(error: PluginPackageError) -> Self {
+        Self::Package(error)
+    }
+}
+
+impl From<PluginCatalogError> for PluginInstallFlowError {
+    fn from(error: PluginCatalogError) -> Self {
+        Self::Catalog(error)
+    }
+}
+
+impl From<PluginError> for PluginInstallFlowError {
+    fn from(error: PluginError) -> Self {
+        Self::Registry(error)
+    }
+}
 
 const PROJECT_HISTORY_VERSION: u32 = 1;
 const MAX_RECENT_PROJECTS: usize = 10;
@@ -346,8 +401,13 @@ fn plugin_install(
 fn plugin_uninstall(
     plugin_id: String,
     app: tauri::AppHandle,
+    installs: tauri::State<'_, PluginInstallState>,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<PluginSummary>, PluginError> {
+    let _mutation = installs
+        .mutation
+        .lock()
+        .map_err(|_| PluginError::StateUnavailable)?;
     registry.uninstall(&app, &plugin_id)
 }
 
@@ -367,6 +427,199 @@ fn plugin_open_repository(
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<(), PluginError> {
     registry.open_repository(&plugin_id)
+}
+
+#[tauri::command]
+fn plugin_catalog_list(
+    registry: tauri::State<'_, PluginRegistry>,
+) -> Result<Vec<TrustedPluginSummary>, PluginInstallFlowError> {
+    let mut catalog = catalog_summaries()?;
+    let installed = registry.list()?;
+    if catalog.iter().any(|entry| {
+        installed
+            .iter()
+            .any(|plugin| plugin.bundled && plugin.id == entry.manifest.id)
+    }) {
+        return Err(PluginCatalogError::InvalidCatalog.into());
+    }
+    for entry in &mut catalog {
+        if let Some(plugin) = installed
+            .iter()
+            .find(|plugin| plugin.installed && plugin.id == entry.manifest.id)
+        {
+            entry.installed_version = Some(plugin.version.clone());
+            entry.download_available = plugin.version < entry.manifest.version;
+        }
+    }
+    Ok(catalog)
+}
+
+fn ensure_trusted_download_available(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    version: &semver::Version,
+) -> Result<(), PluginInstallFlowError> {
+    if let Some(plugin) = registry
+        .list()?
+        .into_iter()
+        .find(|plugin| plugin.id == plugin_id)
+    {
+        if plugin.bundled {
+            return Err(PluginCatalogError::InvalidCatalog.into());
+        }
+        if plugin.installed && plugin.version >= *version {
+            return Err(PluginPackageError::AlreadyInstalled.into());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn plugin_package_select(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PluginInstallState>,
+) -> Result<Option<PluginInstallReview>, PluginInstallFlowError> {
+    let Some(selection) = app
+        .dialog()
+        .file()
+        .set_title("Selecionar pacote de plugin do Lyrnova")
+        .add_filter("Pacote de plugin", &["zst"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let package_path = selection
+        .into_path()
+        .map_err(|_| PluginPackageError::PackageUnavailable)?;
+    let asset = package_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(PluginPackageError::InvalidDescriptor)?;
+    let descriptor_path = package_path.with_file_name(format!("{asset}.json"));
+    let descriptor = PluginPackageDescriptor::read_sidecar(&descriptor_path)?;
+    let host_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| PluginPackageError::InvalidManifest)?;
+    let _mutation = state
+        .mutation
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    let installer = PluginPackageInstaller::new(plugin_storage_root(&app)?, host_version);
+    let staged = installer.stage_local(&package_path, descriptor)?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let review = PluginInstallReview {
+        token: token.clone(),
+        review: staged.review().clone(),
+    };
+    let mut current = state
+        .pending
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    *current = Some(PendingPluginInstall { token, staged });
+    Ok(Some(review))
+}
+
+#[tauri::command]
+async fn plugin_package_download(
+    plugin_id: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PluginInstallState>,
+    registry: tauri::State<'_, PluginRegistry>,
+) -> Result<PluginInstallReview, PluginInstallFlowError> {
+    let release = trusted_release(&plugin_id)?;
+    ensure_trusted_download_available(
+        registry.inner(),
+        &release.manifest.id,
+        &release.manifest.version,
+    )?;
+    let root = plugin_storage_root(&app)?;
+    let host_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| PluginPackageError::InvalidManifest)?;
+    let staged = tauri::async_runtime::spawn_blocking(move || {
+        let downloaded = download_release(&root, &release)?;
+        PluginPackageInstaller::new(root, host_version)
+            .stage_local(downloaded.path(), release.descriptor.clone())
+            .map_err(PluginInstallFlowError::from)
+    })
+    .await
+    .map_err(|_| PluginCatalogError::DownloadFailed)??;
+
+    let _mutation = state
+        .mutation
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    ensure_trusted_download_available(
+        registry.inner(),
+        &staged.review().manifest.id,
+        &staged.review().manifest.version,
+    )?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let review = PluginInstallReview {
+        token: token.clone(),
+        review: staged.review().clone(),
+    };
+    let mut current = state
+        .pending
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    *current = Some(PendingPluginInstall { token, staged });
+    Ok(review)
+}
+
+#[tauri::command]
+fn plugin_package_confirm(
+    token: String,
+    approved_permissions: Vec<PluginPermission>,
+    app: tauri::AppHandle,
+    installs: tauri::State<'_, PluginInstallState>,
+    registry: tauri::State<'_, PluginRegistry>,
+) -> Result<Vec<PluginSummary>, PluginInstallFlowError> {
+    let _mutation = installs
+        .mutation
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    let mut current = installs
+        .pending
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    let pending = current
+        .as_ref()
+        .filter(|pending| pending.token == token)
+        .ok_or(PluginInstallFlowError::UnknownSession)?;
+    if !permissions_exactly_match(
+        &pending.staged.review().manifest.permissions,
+        approved_permissions.iter().copied(),
+    ) {
+        return Err(PluginPackageError::PermissionApprovalRequired.into());
+    }
+    let staged = current
+        .take()
+        .ok_or(PluginInstallFlowError::UnknownSession)?
+        .staged;
+    drop(current);
+
+    let installed = staged.install(&approved_permissions)?;
+    registry
+        .register_external_install(&app, &installed, &approved_permissions)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn plugin_package_cancel(
+    token: String,
+    state: tauri::State<'_, PluginInstallState>,
+) -> Result<(), PluginInstallFlowError> {
+    let mut current = state
+        .pending
+        .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    if current
+        .as_ref()
+        .is_none_or(|pending| pending.token != token)
+    {
+        return Err(PluginInstallFlowError::UnknownSession);
+    }
+    current.take();
+    Ok(())
 }
 
 #[tauri::command]
@@ -543,6 +796,7 @@ pub fn run() {
         .manage(LoginState(Arc::new(AtomicBool::new(false))))
         .manage(ApprovalBroker::default())
         .manage(PluginRegistry::default())
+        .manage(PluginInstallState::default())
         .manage(TerminalService::new())
         .setup(|app| {
             app.state::<PluginRegistry>().load(app.handle());
@@ -574,6 +828,11 @@ pub fn run() {
             plugin_uninstall,
             plugin_set_enabled,
             plugin_open_repository,
+            plugin_catalog_list,
+            plugin_package_select,
+            plugin_package_download,
+            plugin_package_confirm,
+            plugin_package_cancel,
             terminal_start,
             terminal_write,
             terminal_stop,
@@ -594,9 +853,11 @@ use app_server::{
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RECENT_PROJECTS, PROJECT_HISTORY_VERSION, ProjectHistory, remember_project_path,
-        validated_project_name,
+        MAX_RECENT_PROJECTS, PROJECT_HISTORY_VERSION, PluginInstallFlowError, ProjectHistory,
+        remember_project_path, validated_project_name,
     };
+    use crate::plugin_catalog::PluginCatalogError;
+    use crate::plugin_package::PluginPackageError;
     use crate::workspace::WorkspaceError;
 
     #[test]
@@ -653,6 +914,35 @@ mod tests {
                 .filter(|path| path.as_str() == "/projects/project-5")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn plugin_install_errors_keep_their_domain_across_ipc() {
+        let package = serde_json::to_value(PluginInstallFlowError::Package(
+            PluginPackageError::PermissionApprovalRequired,
+        ))
+        .unwrap();
+        let expired = serde_json::to_value(PluginInstallFlowError::UnknownSession).unwrap();
+        let catalog = serde_json::to_value(PluginInstallFlowError::Catalog(
+            PluginCatalogError::DownloadUrlDenied,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            package,
+            serde_json::json!({
+                "domain": "package",
+                "error": { "code": "permission_approval_required" }
+            })
+        );
+        assert_eq!(expired, serde_json::json!({ "domain": "unknown_session" }));
+        assert_eq!(
+            catalog,
+            serde_json::json!({
+                "domain": "catalog",
+                "error": { "code": "download_url_denied" }
+            })
         );
     }
 }

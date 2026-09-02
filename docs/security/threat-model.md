@@ -46,6 +46,14 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | ANSI/Markdown injeta UI | sanitização e CSP |
 | Prompt injection em arquivo | conteúdo não amplia authority |
 | Plugin/backend comprometido | protocolo limitado e policy engine independente |
+| Frontend injeta path de pacote | seleção nativa e path mantido somente no núcleo Rust |
+| Confirmação troca permissões revisadas | token efêmero e igualdade exata no command Rust |
+| Remoção promove versão antiga | quarentena atômica do diretório completo do ID |
+| Falha após remoção física | rollback antes do commit; falha fechada se rollback falhar |
+| Frontend troca URL ou hash de download | IPC aceita somente ID do catálogo embarcado |
+| Redirect de release causa SSRF | HTTPS e allowlist exata verificados em cada salto |
+| Download sem `Content-Length` esgota disco | limite aplicado durante o streaming |
+| Catálogo tenta downgrade | versão comparada antes e depois da rede sob lock |
 | URL de login forjada | abrir somente HTTPS nos hosts permitidos pelo provider |
 | Token vaza para o frontend/log | sessão no adapter; projeção mínima da conta; redaction |
 | E-mail exposto indevidamente | memória/UI só quando necessário; nunca em telemetria |
@@ -87,9 +95,28 @@ manifesto e publica a versão por rename atômico somente após revisão exata d
 permissões. O pacote nasce desabilitado e não executável. Download e execução
 de pacotes externos continuam desativados.
 
+A interface abre a seleção pelo núcleo Rust e não envia paths pelo IPC. Para a
+revisão, recebe apenas dados tipados e um token opaco ligado ao único staging
+pendente. Confirmar exige o mesmo token e exatamente as permissões do manifesto;
+cancelar ou substituir a sessão remove os temporários. Campos não confiáveis do
+manifesto são inseridos na interface como texto, sem interpretação HTML.
+
 Cada instalação mantém um recibo host-managed com hash determinístico da árvore
 extraída. O catálogo recalcula esse hash e revalida layout, identidade, versão,
 manifesto e entrypoint em todo reload. Corrupção, links, arquivos especiais ou
 tentativa de sobrepor um ID embutido removem todos os plugins externos do estado
 de autoridade. Atualizações também removem habilitação e grants até nova
 revisão. O recibo não substitui assinatura criptográfica do publisher.
+
+Ao remover um plugin externo, o núcleo valida o destino e move todas as versões
+por rename atômico para uma quarentena fora do catálogo. Preferências e grants só
+são publicados depois da reconstrução e persistência; falhas restauram o diretório.
+Se o rollback falhar, a autoridade externa falha fechada. Resíduos de uma queda
+depois do rename são apagados antes da descoberta na próxima inicialização.
+
+O catálogo curado é parte imutável do binário e associa cada manifesto a um
+descritor SHA-256 e uma tag. O frontend solicita somente o ID; URL e destino são
+derivados no núcleo. Downloads usam HTTPS, timeout, limite de redirects e hosts
+exatos do GitHub, com limite de tamanho durante o streaming. Arquivos parciais são
+privados e limpos após erro ou reinicialização. Hash e manifesto são revalidados
+antes da revisão, e versões iguais ou inferiores à instalada são recusadas.

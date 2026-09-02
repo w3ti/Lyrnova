@@ -41,5 +41,5 @@ de versão remove habilitação e concessões até nova revisão.
 - o estado v3 é migrado usando as versões do catálogo validado;
 - o recibo detecta corrupção e adulteração acidental, mas não substitui uma
   assinatura de publisher nem autentica um atacante com acesso ao estado local;
-- remoção física, UI de revisão, downloads e assinatura permanecem etapas
-  posteriores.
+- a UI de revisão foi definida pela ADR-0008, a remoção física pela ADR-0009 e
+  downloads curados pela ADR-0010; assinatura permanece etapa posterior.

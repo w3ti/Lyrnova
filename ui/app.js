@@ -51,6 +51,23 @@ const newProjectName = document.querySelector("#new-project-name");
 const newProjectGit = document.querySelector("#new-project-git");
 const projectCreateNote = document.querySelector("#project-create-note");
 const projectSubmit = projectForm.querySelector('[type="submit"]');
+const pluginList = document.querySelector("#plugin-list");
+const pluginInstallStatus = document.querySelector("#plugin-install-status");
+const trustedPluginList = document.querySelector("#trusted-plugin-list");
+const pluginReviewDialog = document.querySelector("#plugin-review-dialog");
+const pluginReviewForm = document.querySelector("#plugin-review-form");
+const pluginReviewTitle = document.querySelector("#plugin-review-title");
+const pluginReviewDescription = document.querySelector("#plugin-review-description");
+const pluginReviewMetadata = document.querySelector("#plugin-review-metadata");
+const pluginPermissionList = document.querySelector("#plugin-permission-list");
+const pluginReviewNote = document.querySelector("#plugin-review-note");
+const pluginReviewConfirm = document.querySelector("#plugin-review-confirm");
+const pluginRemoveDialog = document.querySelector("#plugin-remove-dialog");
+const pluginRemoveForm = document.querySelector("#plugin-remove-form");
+const pluginRemoveTitle = document.querySelector("#plugin-remove-title");
+const pluginRemoveDescription = document.querySelector("#plugin-remove-description");
+const pluginRemoveNote = document.querySelector("#plugin-remove-note");
+const pluginRemoveConfirm = document.querySelector("#plugin-remove-confirm");
 const conversation = document.querySelector(".conversation");
 const editorWorkspace = document.querySelector("#editor-workspace");
 const editorTabs = document.querySelector("#editor-tabs");
@@ -86,6 +103,14 @@ const gitCommitButton = document.querySelector("#git-commit-button");
 const sidebarResizer = document.querySelector("#sidebar-resizer");
 const workspaceResizer = document.querySelector("#workspace-resizer");
 const CODEX_PLUGIN_ID = "io.github.w3ti.lyrnova.ai.codex";
+const PLUGIN_PERMISSION_LABELS = Object.freeze({
+  workspace_read: ["Ler o workspace", "Acessa arquivos dentro do projeto aberto."],
+  workspace_write: ["Alterar o workspace", "Modifica arquivos dentro do projeto aberto."],
+  process_spawn: ["Iniciar processos", "Executa o entrypoint e ferramentas declaradas."],
+  network_access: ["Acessar a rede", "Pode se comunicar com serviços externos."],
+  secret_storage: ["Armazenar segredos", "Usa o cofre local de credenciais."],
+  request_approval: ["Solicitar aprovações", "Pode pedir autorização para ações sensíveis."],
+});
 const DEFAULT_IDE_SETTINGS = Object.freeze({
   editorFontSize: 12,
   editorFontFamily: "system",
@@ -104,6 +129,11 @@ let constrainPanelWidths = () => {};
 let projectCreationRunning = false;
 let gitMutationRunning = false;
 let currentGitStatus = null;
+let currentPluginCatalog = [];
+let currentTrustedPluginCatalog = [];
+let pendingPluginReview = null;
+let pendingPluginRemoval = null;
+let pluginMutationRunning = false;
 
 const documentFixtures = new Map([
   ["src-tauri/src/backend.rs", `use std::collections::BTreeMap;
@@ -295,6 +325,393 @@ function updateIdeSetting(key, value) {
   ideSettings = { ...ideSettings, [key]: value };
   applyIdeSettings();
   announce("Configuração aplicada");
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+}
+
+function pluginPermissionCopy(permission) {
+  return PLUGIN_PERMISSION_LABELS[permission] ?? [permission.replaceAll("_", " "), "Permissão declarada pelo manifesto."];
+}
+
+function setPluginInstallStatus(message = "", tone = "info") {
+  pluginInstallStatus.hidden = !message;
+  pluginInstallStatus.textContent = message;
+  pluginInstallStatus.dataset.tone = tone;
+}
+
+function pluginFlowErrorMessage(error) {
+  let detail = error;
+  if (typeof detail === "string") {
+    try { detail = JSON.parse(detail); } catch { return "Não foi possível concluir a operação com o plugin."; }
+  }
+  const code = detail?.error?.code ?? detail?.code ?? detail?.domain;
+  return ({
+    descriptor_unavailable: "O descritor sidecar <arquivo>.json não foi encontrado.",
+    invalid_descriptor: "O descritor do pacote é inválido.",
+    checksum_mismatch: "O SHA-256 do pacote não corresponde ao descritor.",
+    package_too_large: "O pacote excede o limite de tamanho permitido.",
+    invalid_archive: "O arquivo não é um pacote TAR/Zstandard válido.",
+    archive_stream_too_large: "O conteúdo descomprimido excede o limite seguro.",
+    unsafe_entry_path: "O pacote contém um caminho inseguro.",
+    unsupported_entry_type: "O pacote contém links ou tipos de arquivo não permitidos.",
+    invalid_manifest: "O manifesto do plugin é inválido ou incompatível.",
+    permission_approval_required: "Todas as permissões declaradas precisam ser aceitas.",
+    already_installed: "Esta versão do plugin já está instalada.",
+    content_integrity_mismatch: "A integridade do conteúdo instalado não pôde ser confirmada.",
+    invalid_installed_package: "O pacote instalado falhou na revalidação de segurança.",
+    external_package_removal_failed: "Não foi possível mover o pacote para a quarentena de remoção.",
+    external_package_rollback_failed: "A remoção falhou e não pôde ser revertida. Plugins externos foram desativados por segurança.",
+    invalid_catalog: "O catálogo curado falhou na validação de segurança.",
+    unknown_plugin: "O plugin não existe no catálogo curado desta versão do Lyrnova.",
+    download_url_denied: "O destino do download não pertence à allowlist de releases do GitHub.",
+    download_failed: "Não foi possível baixar o pacote da release confiável.",
+    download_too_large: "O download excede o limite de tamanho permitido.",
+    unknown_session: "Esta revisão expirou. Selecione o pacote novamente.",
+  })[code] ?? "Não foi possível concluir a operação com o plugin.";
+}
+
+function createPluginTag(text, tone = "neutral") {
+  const tag = document.createElement("span");
+  tag.className = "plugin-tag";
+  tag.dataset.tone = tone;
+  tag.textContent = text;
+  return tag;
+}
+
+function renderPluginCatalog(plugins = currentPluginCatalog) {
+  currentPluginCatalog = Array.isArray(plugins) ? plugins : [];
+  pluginList.replaceChildren();
+  if (!currentPluginCatalog.length) {
+    const empty = document.createElement("p");
+    empty.className = "plugin-list-empty";
+    empty.textContent = "Nenhum plugin válido foi encontrado.";
+    pluginList.append(empty);
+    return;
+  }
+
+  currentPluginCatalog.forEach((plugin) => {
+    const card = document.createElement("article");
+    card.className = "plugin-card";
+    card.dataset.enabled = String(Boolean(plugin.enabled));
+
+    const heading = document.createElement("div");
+    heading.className = "plugin-card-heading";
+    const mark = document.createElement("span");
+    mark.className = "plugin-card-mark";
+    mark.textContent = plugin.kind === "language" ? "{ }" : "◇";
+    const identity = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = plugin.name;
+    const meta = document.createElement("small");
+    meta.textContent = `${plugin.publisher} · ${plugin.version}`;
+    identity.append(title, meta);
+    const status = createPluginTag(
+      plugin.enabled ? "Ativo" : (plugin.installed ? "Desabilitado" : "Disponível"),
+      plugin.enabled ? "success" : (plugin.installed ? "warning" : "neutral"),
+    );
+    heading.append(mark, identity, status);
+
+    const description = document.createElement("p");
+    description.textContent = plugin.description;
+    const tags = document.createElement("div");
+    tags.className = "plugin-card-tags";
+    tags.append(createPluginTag(plugin.bundled ? "Embutido" : "Externo", plugin.bundled ? "neutral" : "accent"));
+    plugin.permissions.forEach((permission) => tags.append(createPluginTag(pluginPermissionCopy(permission)[0])));
+
+    const footer = document.createElement("div");
+    footer.className = "plugin-card-footer";
+    const authority = document.createElement("small");
+    authority.textContent = plugin.requiresPermissionReview ? "Revisão de permissões necessária" : "Permissões revisadas";
+    footer.append(authority);
+    const actions = document.createElement("div");
+    actions.className = "plugin-card-actions";
+    if (plugin.installed && !plugin.bundled) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "danger-button subtle-danger";
+      remove.dataset.pluginRemove = plugin.id;
+      remove.textContent = "Remover";
+      actions.append(remove);
+    }
+    if (plugin.installed) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "secondary-button";
+      toggle.dataset.pluginToggle = plugin.id;
+      toggle.dataset.enable = String(!plugin.enabled);
+      toggle.textContent = plugin.enabled ? "Desabilitar" : "Ativar";
+      actions.append(toggle);
+    }
+    if (actions.childElementCount) footer.append(actions);
+    card.append(heading, description, tags, footer);
+    pluginList.append(card);
+  });
+}
+
+function renderTrustedPluginCatalog(entries = currentTrustedPluginCatalog) {
+  currentTrustedPluginCatalog = Array.isArray(entries) ? entries : [];
+  trustedPluginList.replaceChildren();
+  if (!currentTrustedPluginCatalog.length) {
+    const empty = document.createElement("p");
+    empty.className = "plugin-list-empty";
+    empty.textContent = "Nenhum pacote foi publicado no catálogo curado desta versão.";
+    trustedPluginList.append(empty);
+    return;
+  }
+
+  currentTrustedPluginCatalog.forEach((entry) => {
+    const plugin = entry.manifest;
+    const installedVersion = entry.installedVersion;
+    const exactVersionInstalled = installedVersion === plugin.version;
+    const card = document.createElement("article");
+    card.className = "plugin-card trusted-plugin-card";
+
+    const heading = document.createElement("div");
+    heading.className = "plugin-card-heading";
+    const mark = document.createElement("span");
+    mark.className = "plugin-card-mark";
+    mark.textContent = plugin.kind === "language" ? "{ }" : "◇";
+    const identity = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = plugin.name;
+    const meta = document.createElement("small");
+    meta.textContent = `${plugin.publisher} · ${plugin.version}`;
+    identity.append(title, meta);
+    heading.append(mark, identity, createPluginTag(exactVersionInstalled ? "Instalado" : "Curado", exactVersionInstalled ? "success" : "accent"));
+
+    const description = document.createElement("p");
+    description.textContent = plugin.description;
+    const tags = document.createElement("div");
+    tags.className = "plugin-card-tags";
+    plugin.permissions.forEach((permission) => tags.append(createPluginTag(pluginPermissionCopy(permission)[0])));
+    const footer = document.createElement("div");
+    footer.className = "plugin-card-footer";
+    const integrity = document.createElement("small");
+    integrity.className = "monospace";
+    integrity.textContent = `SHA-256 ${entry.descriptor.sha256.slice(0, 12)}…`;
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "accent-button";
+    download.dataset.pluginDownload = plugin.id;
+    download.disabled = !entry.downloadAvailable;
+    download.textContent = exactVersionInstalled
+      ? "Instalado"
+      : (installedVersion ? (entry.downloadAvailable ? "Baixar atualização" : "Versão mais nova instalada") : "Baixar e revisar");
+    footer.append(integrity, download);
+    card.append(heading, description, tags, footer);
+    trustedPluginList.append(card);
+  });
+}
+
+function appendReviewMetadata(label, value, monospace = false) {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  if (monospace) detail.className = "monospace";
+  pluginReviewMetadata.append(term, detail);
+}
+
+function updatePluginReviewConfirmation() {
+  const permissions = [...pluginPermissionList.querySelectorAll('input[type="checkbox"]')];
+  pluginReviewConfirm.disabled = pluginMutationRunning || permissions.some((input) => !input.checked);
+}
+
+function showPluginReview(stage) {
+  pendingPluginReview = stage;
+  const { manifest, descriptor, packageBytes, entryCount, expandedBytes } = stage.review;
+  pluginReviewTitle.textContent = `${manifest.name} ${manifest.version}`;
+  pluginReviewDescription.textContent = manifest.description;
+  pluginReviewMetadata.replaceChildren();
+  appendReviewMetadata("Publisher", manifest.publisher);
+  appendReviewMetadata("Licença", manifest.license);
+  appendReviewMetadata("Pacote", `${descriptor.asset} · ${formatBytes(packageBytes)}`);
+  appendReviewMetadata("Conteúdo", `${entryCount} entradas · ${formatBytes(expandedBytes)}`);
+  appendReviewMetadata("SHA-256", descriptor.sha256, true);
+  appendReviewMetadata("Repositório", manifest.source.repository, true);
+
+  pluginPermissionList.replaceChildren();
+  manifest.permissions.forEach((permission) => {
+    const [title, copy] = pluginPermissionCopy(permission);
+    const label = document.createElement("label");
+    label.className = "plugin-permission";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = permission;
+    checkbox.checked = true;
+    const text = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    const small = document.createElement("small");
+    small.textContent = copy;
+    text.append(strong, small);
+    label.append(checkbox, text);
+    pluginPermissionList.append(label);
+  });
+  pluginReviewNote.hidden = true;
+  pluginReviewNote.textContent = "";
+  pluginMutationRunning = false;
+  pluginReviewConfirm.textContent = "Instalar desabilitado";
+  updatePluginReviewConfirmation();
+  previousFocus = document.activeElement;
+  pluginReviewDialog.showModal();
+  pluginReviewConfirm.focus();
+}
+
+async function selectPluginPackage() {
+  if (!invoke || pluginMutationRunning) return;
+  pluginMutationRunning = true;
+  setPluginInstallStatus("Validando pacote e preparando revisão…");
+  const trigger = document.querySelector('[data-action="select-plugin-package"]');
+  if (trigger) trigger.disabled = true;
+  try {
+    const stage = await invoke("plugin_package_select");
+    if (stage) {
+      setPluginInstallStatus();
+      showPluginReview(stage);
+    } else {
+      setPluginInstallStatus("Seleção cancelada.");
+    }
+  } catch (error) {
+    setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
+    announce("Pacote de plugin recusado");
+  } finally {
+    pluginMutationRunning = false;
+    if (trigger) trigger.disabled = false;
+  }
+}
+
+async function downloadPluginPackage(pluginId) {
+  if (!invoke || pluginMutationRunning) return;
+  pluginMutationRunning = true;
+  setPluginInstallStatus("Baixando pacote do catálogo curado…");
+  const trigger = [...trustedPluginList.querySelectorAll("[data-plugin-download]")]
+    .find((button) => button.dataset.pluginDownload === pluginId);
+  if (trigger) trigger.disabled = true;
+  try {
+    const stage = await invoke("plugin_package_download", { pluginId });
+    setPluginInstallStatus();
+    showPluginReview(stage);
+  } catch (error) {
+    setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
+    announce("Download de plugin recusado");
+  } finally {
+    pluginMutationRunning = false;
+    if (trigger) trigger.disabled = false;
+  }
+}
+
+async function cancelPluginReview() {
+  if (pluginMutationRunning) return;
+  const token = pendingPluginReview?.token;
+  pendingPluginReview = null;
+  if (pluginReviewDialog.open) pluginReviewDialog.close();
+  previousFocus?.focus();
+  if (!invoke || !token) return;
+  try { await invoke("plugin_package_cancel", { token }); } catch { /* sessão já encerrada */ }
+  setPluginInstallStatus("Instalação cancelada; o staging foi removido.");
+}
+
+async function confirmPluginInstall() {
+  if (!invoke || !pendingPluginReview || pluginMutationRunning) return;
+  const approvedPermissions = [...pluginPermissionList.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+  pluginMutationRunning = true;
+  pluginReviewConfirm.disabled = true;
+  pluginReviewConfirm.textContent = "Instalando…";
+  pluginReviewNote.hidden = true;
+  try {
+    const plugins = await invoke("plugin_package_confirm", {
+      token: pendingPluginReview.token,
+      approvedPermissions,
+    });
+    pendingPluginReview = null;
+    pluginReviewDialog.close();
+    renderPluginCatalog(plugins);
+    renderTrustedPluginCatalog();
+    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    setPluginInstallStatus("Plugin instalado e revisado. Ele permanece desabilitado até você ativá-lo.", "success");
+    announce("Plugin instalado e mantido desabilitado");
+  } catch (error) {
+    pluginReviewNote.textContent = pluginFlowErrorMessage(error);
+    pluginReviewNote.hidden = false;
+    announce("Falha ao instalar plugin");
+  } finally {
+    pluginMutationRunning = false;
+    pluginReviewConfirm.textContent = "Instalar desabilitado";
+    updatePluginReviewConfirmation();
+  }
+}
+
+async function setPluginEnabled(pluginId, enabled) {
+  if (!invoke || pluginMutationRunning) return;
+  pluginMutationRunning = true;
+  try {
+    const plugins = await invoke("plugin_set_enabled", { pluginId, enabled });
+    renderPluginCatalog(plugins);
+    renderTrustedPluginCatalog();
+    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    setPluginInstallStatus(`Plugin ${enabled ? "ativado" : "desabilitado"}.`, "success");
+  } catch (error) {
+    setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
+  } finally {
+    pluginMutationRunning = false;
+  }
+}
+
+function showPluginRemoval(pluginId) {
+  if (pluginMutationRunning) return;
+  const plugin = currentPluginCatalog.find((entry) => entry.id === pluginId && entry.installed && !entry.bundled);
+  if (!plugin) return;
+  pendingPluginRemoval = plugin;
+  pluginRemoveTitle.textContent = `Remover ${plugin.name}?`;
+  pluginRemoveDescription.textContent = `${plugin.publisher} · ${plugin.version}`;
+  pluginRemoveNote.hidden = true;
+  pluginRemoveNote.textContent = "";
+  pluginRemoveConfirm.disabled = false;
+  pluginRemoveConfirm.textContent = "Remover plugin";
+  previousFocus = document.activeElement;
+  pluginRemoveDialog.showModal();
+  pluginRemoveConfirm.focus();
+}
+
+function cancelPluginRemoval() {
+  if (pluginMutationRunning) return;
+  pendingPluginRemoval = null;
+  if (pluginRemoveDialog.open) pluginRemoveDialog.close();
+  previousFocus?.focus();
+}
+
+async function confirmPluginRemoval() {
+  if (!invoke || !pendingPluginRemoval || pluginMutationRunning) return;
+  pluginMutationRunning = true;
+  pluginRemoveConfirm.disabled = true;
+  pluginRemoveConfirm.textContent = "Removendo…";
+  pluginRemoveNote.hidden = true;
+  try {
+    const removedName = pendingPluginRemoval.name;
+    const plugins = await invoke("plugin_uninstall", { pluginId: pendingPluginRemoval.id });
+    pendingPluginRemoval = null;
+    pluginRemoveDialog.close();
+    renderPluginCatalog(plugins);
+    renderTrustedPluginCatalog();
+    applyCodexPluginAvailability(Boolean(plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID)?.enabled));
+    setPluginInstallStatus(`${removedName} e todas as suas versões locais foram removidos.`, "success");
+    announce("Plugin externo removido");
+  } catch (error) {
+    pluginRemoveNote.textContent = pluginFlowErrorMessage(error);
+    pluginRemoveNote.hidden = false;
+    announce("Falha ao remover plugin");
+  } finally {
+    pluginMutationRunning = false;
+    pluginRemoveConfirm.disabled = false;
+    pluginRemoveConfirm.textContent = "Remover plugin";
+  }
 }
 
 function registerRustCompletions() {
@@ -1714,6 +2131,9 @@ document.addEventListener("click", (event) => {
     if (action === "open-project") void openProjectDialog();
     if (action === "create-project") openCreateProjectDialog();
     if (action === "close-project-dialog") closeCreateProjectDialog();
+    if (action === "select-plugin-package") void selectPluginPackage();
+    if (action === "cancel-plugin-review") void cancelPluginReview();
+    if (action === "cancel-plugin-removal") cancelPluginRemoval();
     if (action === "reset-settings") {
       ideSettings = { ...DEFAULT_IDE_SETTINGS };
       applyIdeSettings();
@@ -1743,6 +2163,17 @@ document.addEventListener("click", (event) => {
 
   const gitAction = event.target.closest("[data-git-action]");
   if (gitAction) void runGitFileAction(gitAction.dataset.gitAction, gitAction.dataset.gitPath);
+
+  const pluginToggle = event.target.closest("[data-plugin-toggle]");
+  if (pluginToggle) {
+    void setPluginEnabled(pluginToggle.dataset.pluginToggle, pluginToggle.dataset.enable === "true");
+  }
+
+  const pluginRemove = event.target.closest("[data-plugin-remove]");
+  if (pluginRemove) showPluginRemoval(pluginRemove.dataset.pluginRemove);
+
+  const pluginDownload = event.target.closest("[data-plugin-download]");
+  if (pluginDownload) void downloadPluginPackage(pluginDownload.dataset.pluginDownload);
 
   const tab = event.target.closest("[data-tab]");
   if (tab) {
@@ -1801,6 +2232,36 @@ accountDialog.addEventListener("click", (event) => {
 
 projectDialog.addEventListener("click", (event) => {
   if (event.target === projectDialog) closeCreateProjectDialog();
+});
+
+pluginReviewDialog.addEventListener("click", (event) => {
+  if (event.target === pluginReviewDialog) void cancelPluginReview();
+});
+
+pluginReviewDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  void cancelPluginReview();
+});
+
+pluginPermissionList.addEventListener("change", updatePluginReviewConfirmation);
+
+pluginReviewForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void confirmPluginInstall();
+});
+
+pluginRemoveDialog.addEventListener("click", (event) => {
+  if (event.target === pluginRemoveDialog) cancelPluginRemoval();
+});
+
+pluginRemoveDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  cancelPluginRemoval();
+});
+
+pluginRemoveForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void confirmPluginRemoval();
 });
 
 projectForm.addEventListener("submit", (event) => {
@@ -1888,18 +2349,34 @@ function applyCodexPluginAvailability(enabled) {
 
 async function loadPluginAvailability() {
   if (!invoke) {
+    renderPluginCatalog([]);
     applyCodexPluginAvailability(false);
     return false;
   }
   try {
     const plugins = await invoke("plugin_list");
+    renderPluginCatalog(plugins);
     const codex = plugins.find((plugin) => plugin.id === CODEX_PLUGIN_ID);
     const enabled = Boolean(codex?.installed && codex?.enabled);
     applyCodexPluginAvailability(enabled);
     return enabled;
   } catch {
+    renderPluginCatalog([]);
     applyCodexPluginAvailability(false);
     return false;
+  }
+}
+
+async function loadTrustedPluginCatalog() {
+  if (!invoke) {
+    renderTrustedPluginCatalog([]);
+    return;
+  }
+  try {
+    renderTrustedPluginCatalog(await invoke("plugin_catalog_list"));
+  } catch (error) {
+    renderTrustedPluginCatalog([]);
+    setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
   }
 }
 
@@ -1913,7 +2390,9 @@ async function initializeWorkspace() {
   const [hasProject, hasCodex] = await Promise.all([
     loadProjectSummary(),
     loadPluginAvailability(),
+    loadTrustedPluginCatalog(),
   ]);
+  renderTrustedPluginCatalog();
   if (hasProject) {
     await Promise.all([loadWorkspaceTree(), loadGitStatus()]);
     const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
