@@ -15,6 +15,7 @@
         <button class="activity-button active" type="button" data-activity="explorer" title="Explorer" aria-label="Explorer" aria-pressed="true">▱</button>
         <button class="activity-button" type="button" data-action="command-palette" title="Buscar" aria-label="Buscar">⌕</button>
         <button class="activity-button" type="button" data-activity="git" title="Controle de código-fonte" aria-label="Controle de código-fonte" aria-pressed="false">⑂<span class="activity-badge" id="git-activity-badge">0</span></button>
+        <button class="activity-button" type="button" data-activity="tasks" title="Tasks" aria-label="Tasks" aria-pressed="false">▷</button>
         <button class="activity-button ai-plugin-control" type="button" data-activity="agent" title="Conversas de IA" aria-label="Conversas de IA" aria-pressed="false" hidden>◇</button>
         <span class="activity-spacer"></span>
         <button class="activity-button" type="button" data-activity="settings" title="Configurações" aria-label="Configurações" aria-pressed="false">⚙</button>
@@ -65,6 +66,13 @@
             <div class="git-file-list" id="git-changes-list"><p class="git-empty">Lendo repositório…</p></div>
           </section>
           <p class="git-note" id="git-note">Stage, unstage e commit são locais. Push permanece desativado.</p>
+        </section>
+
+        <section class="sidebar-panel tasks-panel" aria-label="Tasks do projeto">
+          <div class="section-heading"><span>Tasks</span><button class="icon-button" type="button" data-action="refresh-tasks" title="Atualizar tasks" aria-label="Atualizar tasks">↻</button></div>
+          <p class="tasks-status" id="tasks-status">Carregando tasks dos plugins ativos…</p>
+          <div class="task-list" id="task-list"></div>
+          <p class="tasks-security-note">Comandos são validados pelo núcleo e sempre passam por revisão antes da execução.</p>
         </section>
 
         <section class="sidebar-panel agent-panel ai-plugin-control" aria-label="Conversas de IA" hidden>
@@ -274,10 +282,12 @@
 
         <section class="terminal-dock" id="terminal" aria-label="Terminal integrado">
           <header class="terminal-header">
-            <div><button class="active" type="button">Terminal</button><button type="button">Output</button><button type="button">Problemas <span>0</span></button></div>
-            <div><span>/bin/bash</span><button class="icon-button" type="button" data-action="new-terminal" aria-label="Novo terminal">＋</button><button class="icon-button" type="button" data-action="close-terminal" aria-label="Fechar terminal">×</button></div>
+            <div><button class="active" type="button" data-dock-view="terminal">Terminal</button><button type="button" data-dock-view="tasks">Tasks</button><button type="button">Problemas <span>0</span></button></div>
+            <div><span id="dock-context">/bin/bash</span><button class="icon-button" id="cancel-task-button" type="button" data-action="cancel-task" aria-label="Cancelar task" hidden>■</button><button class="icon-button" type="button" data-action="new-terminal" aria-label="Novo terminal">＋</button><button class="icon-button" type="button" data-action="close-terminal" aria-label="Fechar terminal">×</button></div>
           </header>
           <pre class="terminal-output" id="terminal-output" tabindex="0" aria-label="Saída do terminal">Terminal local do Lyrnova · /bin/bash
+</pre>
+          <pre class="terminal-output task-output" id="task-output" tabindex="0" aria-label="Saída da task" hidden>Nenhuma task executada nesta sessão.
 </pre>
           <form class="terminal-form" id="terminal-form"><span class="terminal-prompt" aria-hidden="true">$</span><label class="visually-hidden" for="terminal-input">Comando</label><input id="terminal-input" type="text" autocomplete="off" spellcheck="false" placeholder="Digite um comando e pressione Enter"></form>
         </section>
@@ -357,6 +367,24 @@
         <div class="plugin-remove-warning"><strong>Esta ação remove todas as versões locais.</strong><p>O plugin será desabilitado, suas permissões serão revogadas e os arquivos instalados serão excluídos.</p></div>
         <p class="integration-note" id="plugin-remove-note" hidden></p>
         <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-plugin-removal">Cancelar</button><button class="danger-button" id="plugin-remove-confirm" type="submit">Remover plugin</button></div>
+      </form>
+    </dialog>
+    <dialog class="account-dialog task-review-dialog" id="task-review-dialog" aria-labelledby="task-review-title">
+      <form id="task-review-form">
+        <div class="dialog-heading">
+          <span class="account-mark task-review-mark" aria-hidden="true">▷</span>
+          <div><p class="eyebrow">Execução controlada</p><h2 id="task-review-title">Revisar task</h2></div>
+          <button class="icon-button" type="button" data-action="cancel-task-review" aria-label="Cancelar execução">×</button>
+        </div>
+        <p class="dialog-copy" id="task-review-description"></p>
+        <dl class="plugin-review-metadata" id="task-review-metadata"></dl>
+        <section class="task-command-review" aria-labelledby="task-command-title">
+          <h3 id="task-command-title">Comando exato</h3>
+          <pre id="task-review-command"></pre>
+        </section>
+        <div class="task-risk-note" id="task-risk-note"></div>
+        <p class="integration-note" id="task-review-note" hidden></p>
+        <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-task-review">Cancelar</button><button class="accent-button" id="task-review-confirm" type="submit">Executar task</button></div>
       </form>
     </dialog>
     <div class="sr-status visually-hidden" id="sr-status" role="status" aria-live="polite"></div>

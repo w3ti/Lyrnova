@@ -105,6 +105,20 @@ const gitCommitMessage = document.querySelector("#git-commit-message");
 const gitCommitButton = document.querySelector("#git-commit-button");
 const sidebarResizer = document.querySelector("#sidebar-resizer");
 const workspaceResizer = document.querySelector("#workspace-resizer");
+const taskList = document.querySelector("#task-list");
+const tasksStatus = document.querySelector("#tasks-status");
+const taskOutput = document.querySelector("#task-output");
+const dockContext = document.querySelector("#dock-context");
+const cancelTaskButton = document.querySelector("#cancel-task-button");
+const taskReviewDialog = document.querySelector("#task-review-dialog");
+const taskReviewForm = document.querySelector("#task-review-form");
+const taskReviewTitle = document.querySelector("#task-review-title");
+const taskReviewDescription = document.querySelector("#task-review-description");
+const taskReviewMetadata = document.querySelector("#task-review-metadata");
+const taskReviewCommand = document.querySelector("#task-review-command");
+const taskRiskNote = document.querySelector("#task-risk-note");
+const taskReviewNote = document.querySelector("#task-review-note");
+const taskReviewConfirm = document.querySelector("#task-review-confirm");
 const PLUGIN_PERMISSION_LABELS = Object.freeze({
   workspace_read: ["Ler o workspace", "Acessa arquivos dentro do projeto aberto."],
   workspace_write: ["Alterar o workspace", "Modifica arquivos dentro do projeto aberto."],
@@ -140,6 +154,10 @@ let currentTrustedPluginCatalog = [];
 let pendingPluginReview = null;
 let pendingPluginRemoval = null;
 let pluginMutationRunning = false;
+let currentTasks = [];
+let pendingTaskReview = null;
+let runningTask = null;
+let dockView = "terminal";
 
 const documentFixtures = new Map([
   ["src-tauri/src/backend.rs", `use std::collections::BTreeMap;
@@ -667,6 +685,7 @@ async function updatePluginCatalog() {
     const plugins = await invoke("plugin_list");
     renderPluginCatalog(plugins);
     await refreshAiProviderAvailability();
+    await loadTasks();
     setPluginInstallStatus("Catálogo autenticado e atualizado.", "success");
     announce("Catálogo de plugins atualizado");
   } catch (error) {
@@ -707,6 +726,7 @@ async function confirmPluginInstall() {
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
     await refreshAiProviderAvailability();
+    await loadTasks();
     setPluginInstallStatus("Plugin instalado e revisado. Ele permanece desabilitado até você ativá-lo.", "success");
     announce("Plugin instalado e mantido desabilitado");
   } catch (error) {
@@ -728,6 +748,7 @@ async function setPluginEnabled(pluginId, enabled) {
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
     await refreshAiProviderAvailability();
+    await loadTasks();
     setPluginInstallStatus(`Plugin ${enabled ? "ativado" : "desabilitado"}.`, "success");
   } catch (error) {
     setPluginInstallStatus(pluginFlowErrorMessage(error), "error");
@@ -773,6 +794,7 @@ async function confirmPluginRemoval() {
     renderPluginCatalog(plugins);
     renderTrustedPluginCatalog();
     await refreshAiProviderAvailability();
+    await loadTasks();
     setPluginInstallStatus(`${removedName} e todas as suas versões locais foram removidos.`, "success");
     announce("Plugin externo removido");
   } catch (error) {
@@ -963,8 +985,10 @@ function toggleTerminal(force) {
   const next = typeof force === "boolean" ? force : terminal.hidden;
   terminal.hidden = !next;
   if (next) {
-    void startTerminal();
-    window.requestAnimationFrame(() => terminalInput.focus());
+    if (dockView === "terminal") {
+      void startTerminal();
+      window.requestAnimationFrame(() => terminalInput.focus());
+    }
   }
   document.querySelectorAll('[data-action="toggle-terminal"]').forEach((button) => button.setAttribute("aria-pressed", String(next)));
   announce(next ? "Terminal aberto" : "Terminal fechado");
@@ -1004,6 +1028,208 @@ async function bindTerminalOutput() {
   }
 }
 
+function setDockView(view) {
+  dockView = view === "tasks" ? "tasks" : "terminal";
+  const showingTasks = dockView === "tasks";
+  terminalOutput.hidden = showingTasks;
+  terminalForm.hidden = showingTasks;
+  taskOutput.hidden = !showingTasks;
+  dockContext.textContent = showingTasks ? (runningTask?.label || "Saída de Tasks") : "/bin/bash";
+  cancelTaskButton.hidden = !showingTasks || !runningTask;
+  document.querySelectorAll("[data-dock-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.dockView === dockView);
+  });
+  if (!showingTasks) void startTerminal();
+}
+
+function appendTaskOutput(data) {
+  taskOutput.textContent += data;
+  if (taskOutput.textContent.length > 1_100_000) {
+    taskOutput.textContent = taskOutput.textContent.slice(-1_000_000);
+  }
+  taskOutput.scrollTop = taskOutput.scrollHeight;
+}
+
+async function bindTaskOutput() {
+  if (!listen) return;
+  try {
+    await listen("task-output", ({ payload }) => {
+      if (!runningTask || payload.processId !== runningTask.processId) return;
+      appendTaskOutput(payload.data);
+    });
+  } catch {
+    appendTaskOutput("\n[Streaming de Tasks indisponível]\n");
+  }
+}
+
+function taskAccessLabel(task) {
+  if (task.access === "workspace_write") return "Escrita";
+  return task.network ? "Rede" : "Somente leitura";
+}
+
+function renderTasks(items = currentTasks) {
+  currentTasks = Array.isArray(items) ? items : [];
+  taskList.replaceChildren();
+  if (!currentTasks.length) {
+    const empty = document.createElement("p");
+    empty.className = "tasks-status";
+    empty.textContent = "Nenhum plugin ativo oferece Tasks para este workspace.";
+    taskList.append(empty);
+    return;
+  }
+  currentTasks.forEach((task) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "task-item";
+    button.dataset.taskPlugin = task.pluginId;
+    button.dataset.taskId = task.taskId;
+    const mark = document.createElement("span");
+    mark.className = "task-item-mark";
+    mark.textContent = "▷";
+    const copy = document.createElement("span");
+    copy.className = "task-item-copy";
+    const title = document.createElement("strong");
+    title.textContent = task.label;
+    const detail = document.createElement("small");
+    detail.textContent = task.detail ? `${task.pluginName} · ${task.detail}` : task.pluginName;
+    copy.append(title, detail);
+    const risk = document.createElement("span");
+    risk.className = "task-item-risk";
+    risk.textContent = taskAccessLabel(task);
+    button.append(mark, copy, risk);
+    taskList.append(button);
+  });
+}
+
+function taskFlowErrorMessage(error) {
+  const domain = error?.domain;
+  const nested = error?.error?.domain || error?.error?.code || error?.error;
+  if (domain === "no_workspace") return "Abra um projeto antes de executar Tasks.";
+  if (nested === "authorization_changed") return "As permissões do plugin mudaram; revise a Task novamente.";
+  if (nested === "permission_denied") return "A Task pede uma autoridade que o plugin não possui.";
+  if (domain === "runtime") return "O runtime do plugin recusou ou interrompeu a operação.";
+  if (domain === "plugin") return "O plugin não está mais instalado, ativo ou autorizado.";
+  return "A Task foi recusada pela política do Lyrnova.";
+}
+
+async function loadTasks() {
+  if (!invoke) {
+    tasksStatus.textContent = "Tasks ficam disponíveis no aplicativo desktop.";
+    renderTasks([]);
+    return;
+  }
+  tasksStatus.removeAttribute("data-state");
+  tasksStatus.textContent = "Consultando plugins ativos…";
+  try {
+    const catalog = await invoke("task_list");
+    renderTasks(catalog.items);
+    const strong = catalog.sandbox?.isolatedNetwork === "strong";
+    tasksStatus.dataset.state = strong ? "strong" : "error";
+    tasksStatus.textContent = strong
+      ? `${catalog.items.length} ${catalog.items.length === 1 ? "Task disponível" : "Tasks disponíveis"} · sandbox forte ativo`
+      : "Sandbox forte indisponível; execuções protegidas falharão fechadas.";
+  } catch (error) {
+    renderTasks([]);
+    tasksStatus.dataset.state = "error";
+    tasksStatus.textContent = taskFlowErrorMessage(error);
+  }
+}
+
+function appendTaskReviewMetadata(label, value) {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  taskReviewMetadata.append(term, detail);
+}
+
+async function showTaskReview(pluginId, taskId) {
+  if (!invoke || runningTask) {
+    if (runningTask) announce("Cancele ou aguarde a Task atual antes de iniciar outra");
+    return;
+  }
+  tasksStatus.textContent = "Preparando revisão da Task…";
+  try {
+    const review = await invoke("task_review", { pluginId, taskId });
+    pendingTaskReview = review;
+    taskReviewTitle.textContent = review.label;
+    taskReviewDescription.textContent = review.detail || `Task fornecida por ${review.pluginName}.`;
+    taskReviewMetadata.replaceChildren();
+    appendTaskReviewMetadata("Plugin", `${review.pluginName} · ${review.pluginId}`);
+    appendTaskReviewMetadata("Diretório", review.process.cwd);
+    appendTaskReviewMetadata("Acesso", review.process.access === "workspace_write" ? "Escrita limitada ao workspace" : "Workspace somente leitura");
+    appendTaskReviewMetadata("Rede", review.process.network ? "Permitida pelo grant do plugin" : "Negada");
+    appendTaskReviewMetadata("Sandbox", review.process.sandbox === "strong" ? "Forte" : "Indisponível");
+    taskReviewCommand.textContent = review.process.command;
+    taskRiskNote.dataset.risk = review.process.risk;
+    taskRiskNote.textContent = review.process.risk === "destructive"
+      ? "O comando contém uma operação potencialmente destrutiva. Confira cuidadosamente antes de executar."
+      : (review.process.risk === "approval_required"
+        ? "Esta execução usa shell, escrita ou rede e exige sua confirmação explícita."
+        : "Execução somente leitura. O comando ainda será isolado e auditado.");
+    taskReviewNote.hidden = true;
+    taskReviewConfirm.disabled = false;
+    previousFocus = document.activeElement;
+    taskReviewDialog.showModal();
+    taskReviewConfirm.focus();
+    void loadTasks();
+  } catch (error) {
+    tasksStatus.dataset.state = "error";
+    tasksStatus.textContent = taskFlowErrorMessage(error);
+  }
+}
+
+async function cancelTaskReview() {
+  const token = pendingTaskReview?.process.reviewToken;
+  pendingTaskReview = null;
+  if (taskReviewDialog.open) taskReviewDialog.close();
+  previousFocus?.focus();
+  if (!invoke || !token) return;
+  try { await invoke("task_review_discard", { reviewToken: token }); } catch { /* token expirado ou já consumido */ }
+}
+
+async function executeReviewedTask() {
+  if (!invoke || !pendingTaskReview || runningTask) return;
+  const review = pendingTaskReview;
+  pendingTaskReview = null;
+  taskReviewConfirm.disabled = true;
+  taskReviewDialog.close();
+  runningTask = {
+    processId: review.process.processId,
+    label: review.label,
+  };
+  taskOutput.textContent = `Task: ${review.label}\nPlugin: ${review.pluginName}\nComando: ${review.process.command}\n\n`;
+  terminal.hidden = false;
+  setDockView("tasks");
+  announce(`Executando ${review.label}`);
+  try {
+    const result = await invoke("task_execute", { reviewToken: review.process.reviewToken });
+    const code = result.exitCode === null ? "sem código" : `código ${result.exitCode}`;
+    appendTaskOutput(`\n[${result.outcome} · ${code} · ${result.durationMs} ms${result.stdoutTruncated || result.stderrTruncated ? " · saída truncada" : ""}]\n`);
+    announce(result.outcome === "exited" && result.exitCode === 0 ? "Task concluída" : "Task encerrada");
+  } catch (error) {
+    appendTaskOutput(`\n[${taskFlowErrorMessage(error)}]\n`);
+    announce("Task recusada ou interrompida");
+  } finally {
+    runningTask = null;
+    cancelTaskButton.hidden = true;
+    dockContext.textContent = "Saída de Tasks";
+  }
+}
+
+async function cancelRunningTask() {
+  if (!invoke || !runningTask) return;
+  cancelTaskButton.disabled = true;
+  try {
+    await invoke("task_cancel", { processId: runningTask.processId });
+    appendTaskOutput("\n[Cancelamento solicitado]\n");
+  } catch {
+    appendTaskOutput("\n[A Task já não está em execução]\n");
+  } finally {
+    cancelTaskButton.disabled = false;
+  }
+}
+
 function switchActivity(panel) {
   if (panel === "agent" && !aiProviderEnabled) {
     announce("Instale e ative um plugin de IA para abrir conversas");
@@ -1024,7 +1250,8 @@ function switchActivity(panel) {
     if (narrowWorkspace.matches) appShell.dataset.sidebarOpen = "true";
   }
   if (panel === "git") void loadGitStatus();
-  announce(({ explorer: "Explorer aberto", git: "Controle de código-fonte aberto", agent: "Conversas abertas", settings: "Configurações abertas" })[panel]);
+  if (panel === "tasks") void loadTasks();
+  announce(({ explorer: "Explorer aberto", git: "Controle de código-fonte aberto", tasks: "Tasks abertas", agent: "Conversas abertas", settings: "Configurações abertas" })[panel]);
 }
 
 function clamp(value, minimum, maximum) {
@@ -2003,6 +2230,7 @@ function clearEditorWorkspace() {
 async function openProjectDialog() {
   if (!invoke) return;
   if (agentTurnRunning) { announce("Aguarde o turno atual terminar antes de trocar de projeto"); return; }
+  if (runningTask) { announce("Cancele ou aguarde a Task atual antes de trocar de projeto"); return; }
   if (hasDirtyDocuments() && !window.confirm("Há arquivos não salvos. Abrir outro projeto descartará esses rascunhos. Continuar?")) return;
   try {
     const project = await invoke("project_open_dialog");
@@ -2012,7 +2240,7 @@ async function openProjectDialog() {
     activeAgentThreadId = null;
     streamedAgentMessages.clear();
     terminalOutput.textContent = `Terminal local do Lyrnova · ${project.path}\n`;
-    await Promise.all([loadWorkspaceTree(), loadGitStatus()]);
+    await Promise.all([loadWorkspaceTree(), loadGitStatus(), loadTasks()]);
     const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
     if (firstFile) await openDocument(firstFile.path, false);
     if (!terminal.hidden) await startTerminal();
@@ -2025,6 +2253,10 @@ async function openProjectDialog() {
 function openCreateProjectDialog() {
   if (agentTurnRunning) {
     announce("Aguarde o turno atual terminar antes de criar um projeto");
+    return;
+  }
+  if (runningTask) {
+    announce("Cancele ou aguarde a Task atual antes de criar um projeto");
     return;
   }
   projectCreateNote.hidden = true;
@@ -2062,7 +2294,7 @@ async function createProject() {
     activeAgentThreadId = null;
     streamedAgentMessages.clear();
     terminalOutput.textContent = `Terminal local do Lyrnova · ${project.path}\n`;
-    await Promise.all([loadWorkspaceTree(), loadGitStatus()]);
+    await Promise.all([loadWorkspaceTree(), loadGitStatus(), loadTasks()]);
     const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
     if (firstFile) await openDocument(firstFile.path, false);
     if (!terminal.hidden) await startTerminal();
@@ -2460,6 +2692,9 @@ document.addEventListener("click", (event) => {
     if (action === "restore-entry") void restoreWorkspaceEntry();
     if (action === "refresh-files") void loadWorkspaceTree(false);
     if (action === "refresh-git") void loadGitStatus();
+    if (action === "refresh-tasks") void loadTasks();
+    if (action === "cancel-task-review") void cancelTaskReview();
+    if (action === "cancel-task") void cancelRunningTask();
     if (action === "git-commit") void commitGitChanges();
     if (action === "open-project") void openProjectDialog();
     if (action === "create-project") openCreateProjectDialog();
@@ -2508,6 +2743,12 @@ document.addEventListener("click", (event) => {
 
   const pluginDownload = event.target.closest("[data-plugin-download]");
   if (pluginDownload) void downloadPluginPackage(pluginDownload.dataset.pluginDownload);
+
+  const task = event.target.closest("[data-task-plugin][data-task-id]");
+  if (task) void showTaskReview(task.dataset.taskPlugin, task.dataset.taskId);
+
+  const dock = event.target.closest("[data-dock-view]");
+  if (dock) setDockView(dock.dataset.dockView);
 
   const tab = event.target.closest("[data-tab]");
   if (tab) {
@@ -2607,6 +2848,20 @@ pluginRemoveForm.addEventListener("submit", (event) => {
   void confirmPluginRemoval();
 });
 
+taskReviewDialog.addEventListener("click", (event) => {
+  if (event.target === taskReviewDialog) void cancelTaskReview();
+});
+
+taskReviewDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  void cancelTaskReview();
+});
+
+taskReviewForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void executeReviewedTask();
+});
+
 projectForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void createProject();
@@ -2677,6 +2932,7 @@ initializeCodeEditor();
 bindWindowControls();
 bindPanelResizers();
 void bindTerminalOutput();
+void bindTaskOutput();
 
 function applyAiProviderAvailability(provider) {
   activeAiProvider = provider;
@@ -2759,6 +3015,7 @@ async function initializeWorkspace() {
     loadProjectSummary(),
     loadPluginAvailability(),
     loadTrustedPluginCatalog(),
+    loadTasks(),
   ]);
   renderTrustedPluginCatalog();
   if (hasProject) {

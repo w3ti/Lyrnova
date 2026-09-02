@@ -64,14 +64,14 @@ pub enum ProcessShell {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessCommand {
     Argv { program: String, args: Vec<String> },
     Shell { shell: ProcessShell, script: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessRequest {
     pub command: ProcessCommand,
     pub cwd: Option<String>,

@@ -11,6 +11,7 @@ pub mod plugin_trust;
 pub mod plugins;
 pub mod process_broker;
 pub mod protocol;
+pub mod tasks;
 pub mod terminal;
 pub mod workspace;
 
@@ -33,7 +34,9 @@ use plugin_package::{
 };
 use plugin_runtime::{PluginRuntimeError, PluginRuntimeService};
 use plugins::{AiProviderSummary, PluginError, PluginRegistry, PluginSummary, plugin_storage_root};
+use process_broker::{ProcessOutputEvent, ProcessResult};
 use serde::{Deserialize, Serialize};
+use tasks::{TaskBroker, TaskError, TaskList, TaskReview};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use terminal::{TerminalError, TerminalService};
@@ -59,6 +62,7 @@ struct PluginLifecycleState {
     pending: Mutex<Option<PendingPluginInstall>>,
     mutation: Mutex<()>,
     runtimes: PluginRuntimeService,
+    tasks: TaskBroker,
 }
 
 struct PendingPluginInstall {
@@ -81,6 +85,33 @@ enum PluginInstallFlowError {
     Registry(PluginError),
     UnknownSession,
     StateUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "domain", content = "error", rename_all = "snake_case")]
+enum TaskFlowError {
+    Plugin(PluginError),
+    Runtime(PluginRuntimeError),
+    Task(TaskError),
+    NoWorkspace,
+}
+
+impl From<PluginError> for TaskFlowError {
+    fn from(error: PluginError) -> Self {
+        Self::Plugin(error)
+    }
+}
+
+impl From<PluginRuntimeError> for TaskFlowError {
+    fn from(error: PluginRuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<TaskError> for TaskFlowError {
+    fn from(error: TaskError) -> Self {
+        Self::Task(error)
+    }
 }
 
 impl From<PluginPackageError> for PluginInstallFlowError {
@@ -270,6 +301,10 @@ fn project_open_dialog(
         workspace,
     };
     let _mutation = plugins.mutation.lock().map_err(|_| WorkspaceError::Io)?;
+    plugins
+        .tasks
+        .invalidate_all()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -364,6 +399,10 @@ fn project_create_dialog(
         workspace,
     };
     let _mutation = plugins.mutation.lock().map_err(|_| WorkspaceError::Io)?;
+    plugins
+        .tasks
+        .invalidate_all()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -645,6 +684,10 @@ fn plugin_uninstall(
         .lock()
         .map_err(|_| PluginError::StateUnavailable)?;
     plugins
+        .tasks
+        .invalidate_plugin(&plugin_id)
+        .map_err(|_| PluginError::StateUnavailable)?;
+    plugins
         .runtimes
         .stop(&plugin_id)
         .map_err(map_runtime_error)?;
@@ -665,6 +708,10 @@ fn plugin_set_enabled(
         .lock()
         .map_err(|_| PluginError::StateUnavailable)?;
     if !enabled {
+        plugins
+            .tasks
+            .invalidate_plugin(&plugin_id)
+            .map_err(|_| PluginError::StateUnavailable)?;
         let summaries = registry.set_enabled(&app, &plugin_id, false)?;
         plugins
             .runtimes
@@ -782,6 +829,10 @@ async fn plugin_catalog_update(
     let _mutation = plugins
         .mutation
         .lock()
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    plugins
+        .tasks
+        .invalidate_all()
         .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
     let stop_result = plugins.runtimes.stop_all().map_err(map_runtime_error);
     registry.reload(&app)?;
@@ -957,12 +1008,21 @@ fn plugin_package_confirm(
             authentication,
         )?;
     }
+    let plugin_id = pending.staged.review().manifest.id.clone();
     let staged = current
         .take()
         .ok_or(PluginInstallFlowError::UnknownSession)?
         .staged;
     drop(current);
 
+    installs
+        .tasks
+        .invalidate_plugin(&plugin_id)
+        .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    installs
+        .runtimes
+        .stop(&plugin_id)
+        .map_err(map_runtime_error)?;
     let installed = staged.install(&approved_permissions)?;
     registry
         .register_external_install(&app, &installed, &approved_permissions)
@@ -1012,6 +1072,108 @@ fn terminal_write(
 #[tauri::command]
 fn terminal_stop(terminal: tauri::State<'_, TerminalService>) -> Result<(), TerminalError> {
     terminal.stop()
+}
+
+#[tauri::command]
+fn task_list(
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+) -> Result<TaskList, TaskFlowError> {
+    let mut items = Vec::new();
+    for provider in registry.enabled_task_providers()? {
+        let response = plugins.runtimes.request(
+            &provider.id,
+            PluginCapability::Tasks,
+            "tasks.list".into(),
+            serde_json::json!({}),
+        )?;
+        items.extend(plugins.tasks.list(&provider, response.result)?);
+    }
+    items.sort_by(|left, right| {
+        left.plugin_name
+            .cmp(&right.plugin_name)
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+    Ok(TaskList {
+        items,
+        sandbox: plugins.tasks.sandbox_diagnostic(),
+    })
+}
+
+#[tauri::command]
+fn task_review(
+    plugin_id: String,
+    task_id: String,
+    window: tauri::WebviewWindow,
+    project: tauri::State<'_, ProjectState>,
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+) -> Result<TaskReview, TaskFlowError> {
+    let root = project_snapshot(&project)
+        .ok_or(TaskFlowError::NoWorkspace)?
+        .workspace
+        .root()
+        .to_owned();
+    let provider = registry.task_provider(&plugin_id)?;
+    let response = plugins.runtimes.request(
+        &provider.id,
+        PluginCapability::Tasks,
+        "tasks.list".into(),
+        serde_json::json!({}),
+    )?;
+    let (review, audit) = plugins
+        .tasks
+        .review(&root, &provider, &task_id, response.result)?;
+    let _ = window.emit("process-audit", audit);
+    Ok(review)
+}
+
+#[tauri::command]
+async fn task_execute(
+    review_token: String,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, PluginRegistry>,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+) -> Result<ProcessResult, TaskFlowError> {
+    let plugin_id = plugins.tasks.pending_plugin_id(&review_token)?;
+    let provider = match registry.task_provider(&plugin_id) {
+        Ok(provider) => provider,
+        Err(error) => {
+            let _ = plugins.tasks.discard(&review_token);
+            return Err(error.into());
+        }
+    };
+    let task_broker = plugins.tasks.clone();
+    let output_window = window.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit: Arc<dyn Fn(ProcessOutputEvent) + Send + Sync> = Arc::new(move |event| {
+            let _ = output_window.emit("task-output", event);
+        });
+        let (result, audits) = task_broker.execute(&review_token, &provider.permissions, emit)?;
+        for audit in audits {
+            let _ = window.emit("process-audit", audit);
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| TaskFlowError::Task(TaskError::StateUnavailable))?
+}
+
+#[tauri::command]
+fn task_review_discard(
+    review_token: String,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+) -> Result<(), TaskError> {
+    plugins.tasks.discard(&review_token)
+}
+
+#[tauri::command]
+fn task_cancel(
+    process_id: String,
+    plugins: tauri::State<'_, PluginLifecycleState>,
+) -> Result<(), TaskError> {
+    plugins.tasks.cancel(&process_id)
 }
 
 #[tauri::command]
@@ -1233,6 +1395,11 @@ pub fn run() {
             terminal_start,
             terminal_write,
             terminal_stop,
+            task_list,
+            task_review,
+            task_execute,
+            task_review_discard,
+            task_cancel,
             agent_account_read,
             agent_logout,
             agent_turn_start,

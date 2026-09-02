@@ -192,6 +192,30 @@ fn workspace_mutations_require_explicit_paths_and_recoverable_delete_confirmatio
 }
 
 #[test]
+fn task_execution_requires_typed_review_and_never_accepts_frontend_authority() {
+    let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
+        .expect("local shell must be readable");
+    let javascript = fs::read_to_string(manifest_dir().join("../ui/app.js"))
+        .expect("local UI behavior must be readable");
+    let rust = fs::read_to_string(manifest_dir().join("src/lib.rs"))
+        .expect("command boundary must be readable");
+
+    assert!(html.contains("data-activity=\"tasks\""));
+    assert!(html.contains("id=\"task-review-dialog\""));
+    assert!(html.contains("id=\"task-review-command\""));
+    assert!(javascript.contains("invoke(\"task_review\", { pluginId, taskId })"));
+    assert!(
+        javascript
+            .contains("invoke(\"task_execute\", { reviewToken: review.process.reviewToken })")
+    );
+    assert!(javascript.contains("invoke(\"task_cancel\", { processId:"));
+    assert!(!javascript.contains("processAuthority"));
+    assert!(!javascript.contains("task_execute\", { command"));
+    assert!(rust.contains("registry.task_provider(&plugin_id)"));
+    assert!(rust.contains("plugins.tasks.pending_plugin_id(&review_token)"));
+}
+
+#[test]
 fn appearance_preferences_are_local_bounded_and_theme_the_editor() {
     let html = fs::read_to_string(manifest_dir().join("../ui/index.html"))
         .expect("local shell must be readable");

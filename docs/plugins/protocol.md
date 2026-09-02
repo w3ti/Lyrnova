@@ -67,3 +67,44 @@ deve depender da janela de shutdown para preservar dados importantes.
   timeout ou excesso de eventos encerram a sessão;
 - payloads não concedem autoridade e nunca são encaminhados diretamente ao
   frontend nem interpretados como comandos.
+
+## Contrato da capability Tasks
+
+O host consulta `tasks.list` sem parâmetros. A resposta é um catálogo fechado:
+
+```json
+{
+  "items": [
+    {
+      "id": "cargo-test",
+      "label": "Cargo: test",
+      "detail": "Executa os testes do workspace",
+      "execution": {
+        "command": {
+          "type": "argv",
+          "program": "cargo",
+          "args": ["test", "--workspace"]
+        },
+        "cwd": null,
+        "environment": {"CARGO_TERM_COLOR": "always"},
+        "access": "workspace_write",
+        "network": false,
+        "timeoutMs": 300000
+      }
+    }
+  ]
+}
+```
+
+O catálogo aceita no máximo 128 entradas, IDs únicos e textos limitados. Objetos e
+campos desconhecidos são recusados. `command` usa `argv` estruturado ou a variante
+explícita `{"type":"shell","shell":"sh","script":"..."}`. Plugins nunca podem
+pedir `escalated` por esta API.
+
+`process_spawn` e `workspace_read` são obrigatórios para oferecer uma Task.
+`workspace_write` e `network_access` são conferidos independentemente quando a
+definição pede essas autoridades. O núcleo busca novamente `tasks.list` ao preparar
+a revisão, transforma a definição em um plano imutável e entrega ao frontend apenas
+IDs e um token opaco. A execução revalida o conjunto exato de grants; desabilitar,
+atualizar ou remover o plugin, assim como trocar de workspace, invalida revisões e
+cancela processos associados.

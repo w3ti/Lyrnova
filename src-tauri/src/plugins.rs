@@ -20,6 +20,7 @@ use crate::plugin_package::{
     cleanup_committed_removals, discover_installed_packages,
 };
 use crate::plugin_runtime::ExternalRuntimeSpec;
+use crate::tasks::TaskProvider;
 
 #[cfg(test)]
 const CODEX_PLUGIN_ID: &str = "io.github.w3ti.lyrnova.ai.codex";
@@ -433,6 +434,36 @@ impl PluginRegistry {
             .collect()
     }
 
+    pub fn enabled_task_providers(&self) -> Result<Vec<TaskProvider>, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        state
+            .catalog
+            .iter()
+            .filter(|plugin| {
+                plugin.external_path.is_some()
+                    && plugin
+                        .manifest
+                        .capabilities
+                        .contains(&PluginCapability::Tasks)
+                    && state.preferences.installed.get(&plugin.manifest.id)
+                        == Some(&plugin.manifest.version)
+                    && state.preferences.enabled.contains(&plugin.manifest.id)
+            })
+            .map(|plugin| task_provider(&state, &plugin.manifest.id))
+            .collect()
+    }
+
+    pub fn task_provider(&self, id: &str) -> Result<TaskProvider, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        task_provider(&state, id)
+    }
+
     pub fn install(
         &self,
         app: &tauri::AppHandle,
@@ -755,6 +786,38 @@ fn external_runtime_spec(
         capabilities: plugin.manifest.capabilities.iter().copied().collect(),
         permissions: granted,
     }))
+}
+
+fn task_provider(state: &PluginRegistryState, id: &str) -> Result<TaskProvider, PluginError> {
+    let plugin = catalog_plugin(&state.catalog, id)?;
+    if plugin.external_path.is_none()
+        || !plugin
+            .manifest
+            .capabilities
+            .contains(&PluginCapability::Tasks)
+    {
+        return Err(PluginError::CapabilityUnavailable);
+    }
+    if state.preferences.installed.get(id) != Some(&plugin.manifest.version) {
+        return Err(PluginError::NotInstalled);
+    }
+    if !state.preferences.enabled.contains(id) {
+        return Err(PluginError::PluginDisabled);
+    }
+    let permissions = state
+        .preferences
+        .grants
+        .get(id)
+        .cloned()
+        .unwrap_or_default();
+    if !permissions_exactly_match(&plugin.manifest.permissions, permissions.iter().copied()) {
+        return Err(PluginError::PermissionApprovalRequired);
+    }
+    Ok(TaskProvider {
+        id: plugin.manifest.id.clone(),
+        name: plugin.manifest.name.clone(),
+        permissions,
+    })
 }
 
 fn summaries(state: &PluginRegistryState) -> Vec<PluginSummary> {
@@ -1300,6 +1363,50 @@ mod tests {
         assert_eq!(
             external_runtime_spec(&invalid_state, external, false),
             Err(PluginError::PermissionApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn task_providers_require_an_enabled_external_capability_and_exact_grants() {
+        let catalog = merge_catalog(
+            &load_catalog_from(BUNDLED_MANIFESTS).unwrap(),
+            vec![external_package(
+                "0.1.0",
+                r#"["workspace_read", "process_spawn"]"#,
+            )],
+        )
+        .unwrap();
+        let external = "io.github.example.lyrnova.tool.external";
+        let mut preferences =
+            normalize_preferences(PluginPreferences::defaults(&catalog), &catalog);
+        preferences.enabled.insert(external.into());
+        preferences.grants.insert(
+            external.into(),
+            [
+                PluginPermission::WorkspaceRead,
+                PluginPermission::ProcessSpawn,
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = PluginRegistryState {
+            catalog,
+            preferences,
+        };
+
+        let provider = task_provider(&state, external).unwrap();
+        assert_eq!(provider.id, external);
+        assert_eq!(provider.name, "External");
+        assert_eq!(provider.permissions.len(), 2);
+
+        state.preferences.enabled.remove(external);
+        assert_eq!(
+            task_provider(&state, external),
+            Err(PluginError::PluginDisabled)
+        );
+        assert_eq!(
+            task_provider(&state, "io.github.w3ti.lyrnova.language.rust"),
+            Err(PluginError::CapabilityUnavailable)
         );
     }
 

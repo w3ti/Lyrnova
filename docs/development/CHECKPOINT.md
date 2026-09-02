@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `abaf0b1`
-Estado: item #14 e aparência publicados; base do broker de processos do item #15 local.
+Commit-base: `c0e16d2`
+Estado: base do item #15 publicada; integração tipada de Tasks local.
 
 ## Direção consolidada
 
@@ -139,8 +139,15 @@ Estado: item #14 e aparência publicados; base do broker de processos do item #1
 - Stdout/stderr são drenados concorrentemente com captura de 1 MiB por stream;
   timeout e cancelamento encerram filhos/netos pelo grupo. Core, arquivos, memória,
   descritores e forks têm limites, e a auditoria registra apenas SHA-256 do comando.
-- A ADR-0016 registra as decisões e os riscos residuais de cgroup/TOCTOU. A próxima
-  fatia do item #15 é ligar o broker a Tasks, grants e revisão na interface.
+- Plugins externos agora oferecem catálogo `tasks.list` estrito e limitado. O
+  frontend seleciona somente plugin + ID; o Rust consulta novamente a definição e
+  deriva toda autoridade dos grants persistidos.
+- O `TaskBroker` cria revisão por token, revalida o conjunto exato de grants antes
+  da execução e nunca permite modo escalated para plugins. Mudança de plugin ou
+  workspace invalida revisões e cancela processos associados.
+- A interface ganhou área de Tasks, diagnóstico de sandbox, diálogo com comando,
+  cwd, rede, acesso e risco, streaming limitado no dock e cancelamento explícito.
+- A ADR-0016 registra a integração concluída e os riscos residuais de cgroup/TOCTOU.
 
 ## Validações já executadas em 2026-09-02
 
@@ -149,7 +156,7 @@ Estado: item #14 e aparência publicados; base do broker de processos do item #1
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace` (137 testes aprovados e 1 teste de integração
+- `cargo test --workspace` (143 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -180,11 +187,11 @@ dependências e não devem ser substituídas.
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
 2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-3. continuar a issue #15 conectando Tasks e aprovações tipadas ao broker, sem dar ao
-   frontend autoridade para escolher grants.
+3. próximo item proposto: issue #16, “Criar fluxo claro de permissões e approvals
+   para plugins e tarefas”.
 
 ## Estado do repositório
 
-O commit `abaf0b1` contém as operações seguras do item #14 e as configurações de
-aparência. A base Rust do item #15 e sua documentação estão no worktree, ainda sem
-commit. Nenhum pacote OBS ou release foi realizado.
+O commit `c0e16d2` contém a base segura do broker de processos. A integração do item
+#15 com Tasks, grants e revisão na interface está no worktree, ainda sem commit.
+Nenhum pacote OBS ou release foi realizado.

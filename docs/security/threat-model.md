@@ -176,5 +176,7 @@ shell implícito e scripts de shell são exibidos exatamente. Modos somente leit
 workspace-write exigem Bubblewrap funcional e falham fechados; host escalated exige
 autoridade independente. Environment começa vazio, rede é negada por padrão, saída
 é drenada com captura limitada e cancelamento/timeout encerram o grupo de processos.
-Auditoria contém o hash do comando, nunca seu conteúdo. A integração dessa base com
-Tasks, grants de plugins e cartões de aprovação ainda está pendente.
+Auditoria contém o hash do comando, nunca seu conteúdo. Tasks externas são catálogos
+tipados e limitados; o núcleo consulta a definição novamente, deriva autoridade dos
+grants persistidos e entrega à interface apenas uma revisão com token opaco. Grants
+mudados e lifecycle do plugin/workspace invalidam revisões e cancelam processos.

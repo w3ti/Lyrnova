@@ -148,6 +148,7 @@ kbd { padding: .12rem .34rem; border: 1px solid var(--border); border-radius: 5p
 .sidebar-panel { display: none; min-height: 0; overflow: hidden; }
 .app-shell[data-activity-panel="explorer"] .explorer-panel { display: flex; flex: 1; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .app-shell[data-activity-panel="git"] .git-panel { display: block; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.app-shell[data-activity-panel="tasks"] .tasks-panel { display: flex; flex: 1; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .app-shell[data-activity-panel="agent"] .agent-panel { display: flex; flex: 1; flex-direction: column; }
 .app-shell[data-activity-panel="settings"] .settings-panel { display: flex; flex: 1; flex-direction: column; overflow-y: auto; }
 .profile-button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; width: 100%; padding: 7px; border-radius: 9px; background: transparent; text-align: left; }
@@ -178,6 +179,19 @@ kbd { padding: .12rem .34rem; border: 1px solid var(--border); border-radius: 5p
 .git-file-list small { overflow: hidden; color: var(--subtle); font-size: .57rem; text-overflow: ellipsis; }
 .git-state { font: 700 .6rem ui-monospace, monospace; }
 .git-state.modified { color: var(--yellow); }
+.tasks-status, .tasks-security-note { margin: 2px 13px 10px; color: var(--subtle); font-size: .62rem; line-height: 1.45; }
+.tasks-status[data-state="error"] { color: var(--red); }
+.tasks-status[data-state="strong"] { color: var(--green); }
+.task-list { display: grid; align-content: start; gap: 5px; padding: 0 9px 10px; }
+.task-item { display: grid; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; padding: 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; }
+.task-item:hover { border-color: var(--border); background: var(--surface-hover); }
+.task-item-mark { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 8px; background: rgb(111 210 165 / 10%); color: var(--green); }
+.task-item-copy { display: grid; min-width: 0; gap: 2px; }
+.task-item-copy strong, .task-item-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-item-copy strong { font-size: .69rem; }
+.task-item-copy small { color: var(--subtle); font-size: .58rem; }
+.task-item-risk { padding: 3px 5px; border-radius: 999px; background: rgb(229 188 96 / 10%); color: var(--yellow); font-size: .52rem; font-weight: 750; }
+.tasks-security-note { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
 .git-state.added { color: var(--green); }
 .git-state.deleted { color: var(--red); }
 .git-state.renamed, .git-state.copied { color: var(--cyan); }
@@ -463,6 +477,8 @@ body.resizing-panels iframe { pointer-events: none; }
 .terminal-header button.active::after { position: absolute; right: 6px; bottom: 0; left: 6px; height: 2px; background: var(--accent); content: ""; }
 .terminal-header span { color: var(--subtle); font-size: .62rem; }
 .terminal-output { min-height: 0; margin: 0; padding: 10px 15px; overflow: auto; color: var(--content-text); font: var(--terminal-font-size, 11px)/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
+.terminal-output[hidden], .terminal-form[hidden], .terminal-header button[hidden] { display: none; }
+.task-output { color: var(--code-text); }
 .terminal-form { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 15px; border-top: 1px solid rgb(174 185 225 / 8%); font: var(--terminal-font-size, 11px) ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .terminal-form input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; }
 .terminal-form input::placeholder { color: #555e78; }
@@ -532,6 +548,13 @@ body.resizing-panels iframe { pointer-events: none; }
 .plugin-remove-warning { margin: 0 18px; padding: 12px; border: 1px solid rgb(236 122 137 / 22%); border-radius: 9px; background: rgb(236 122 137 / 7%); }
 .plugin-remove-warning strong { font-size: .7rem; }
 .plugin-remove-warning p { margin: 5px 0 0; color: var(--muted); font-size: .63rem; line-height: 1.5; }
+.task-review-dialog { width: min(calc(100% - 32px), 620px); }
+.task-review-mark { background: linear-gradient(145deg, #357b61, #285845); }
+.task-command-review { margin: 0 18px 13px; overflow: hidden; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.task-command-review h3 { margin: 0; padding: 9px 11px; border-bottom: 1px solid var(--border); color: var(--subtle); font-size: .61rem; letter-spacing: .08em; text-transform: uppercase; }
+.task-command-review pre { max-height: 190px; margin: 0; padding: 12px; overflow: auto; color: var(--code-text); font: .68rem/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-risk-note { margin: 0 18px; padding: 10px 11px; border: 1px solid rgb(229 188 96 / 25%); border-radius: 9px; background: rgb(229 188 96 / 8%); color: var(--muted); font-size: .65rem; line-height: 1.5; }
+.task-risk-note[data-risk="standard"] { border-color: rgb(111 210 165 / 25%); background: rgb(111 210 165 / 7%); }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 
 .app-shell[data-interface-density="compact"] .activity-button { height: 38px; }

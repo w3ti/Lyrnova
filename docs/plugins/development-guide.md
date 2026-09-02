@@ -81,7 +81,7 @@ manifesto. Somente arquivos regulares e diretórios são aceitos no pacote.
     "asset": "lyrnova-example-tasks-0.1.0-linux-x86_64.tar.zst"
   },
   "capabilities": ["tasks"],
-  "permissions": ["process_spawn"]
+  "permissions": ["workspace_read", "process_spawn"]
 }
 ```
 
@@ -110,6 +110,16 @@ reais. O nome em `source.asset` deve ser idêntico ao nome do pacote final.
 `runtime.type: builtin` e `source.type: bundled` são reservados a componentes
 compilados e distribuídos com o Lyrnova. Um pacote externo que declarar origem
 `bundled` será recusado.
+
+Plugins com capability `tasks` implementam `tasks.list` conforme o contrato em
+[`protocol.md`](protocol.md). Cada Task descreve um comando estruturado, cwd,
+environment permitido, nível de acesso, rede e timeout. O frontend nunca envia
+esses campos de volta: ele seleciona `pluginId + taskId`, e o núcleo consulta o
+runtime novamente, deriva autoridade dos grants persistidos e cria a revisão.
+
+Declare sempre `workspace_read` e `process_spawn`. Acrescente `workspace_write`
+somente se alguma Task realmente modificar o projeto e `network_access` somente se
+ela precisar de rede. Tasks não podem solicitar execução elevada no host.
 
 O schema completo está em
 [`plugin-manifest.schema.json`](plugin-manifest.schema.json). Campos desconhecidos,
@@ -353,7 +363,7 @@ Alimente o entrypoint diretamente, sem usar dados reais:
 
 ```bash
 printf '%s\n' \
-  '{"type":"initialize","protocol_version":1,"plugin_id":"io.github.example.lyrnova.tool.tasks","plugin_version":"0.1.0","capabilities":["tasks"],"permissions":["process_spawn"]}' \
+  '{"type":"initialize","protocol_version":1,"plugin_id":"io.github.example.lyrnova.tool.tasks","plugin_version":"0.1.0","capabilities":["tasks"],"permissions":["workspace_read","process_spawn"]}' \
   '{"type":"shutdown"}' \
   | python3 lyrnova-example-tasks/bin/example-tasks
 ```

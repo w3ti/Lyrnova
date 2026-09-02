@@ -1,6 +1,6 @@
 # ADR-0016: Broker de processos com sandbox e lifecycle cancelável
 
-- Status: base aceita; integração de Tasks pendente
+- Status: aceita
 - Data: 2026-09-02
 
 ## Contexto
@@ -48,10 +48,12 @@ A fronteira é independente do provider e pode atender agentes, plugins e Tasks 
 dar a nenhum deles acesso direto a `Command`. A disponibilidade real de sandbox é
 diagnosticável separadamente para rede isolada e compartilhada.
 
-Esta primeira fatia ainda não substitui o terminal interativo, que representa uma
-ação direta do usuário, nem conecta o protocolo de Tasks e os cartões de aprovação
-ao broker. Essas integrações devem derivar `ProcessAuthority` da origem/grants no
-Rust; o frontend nunca poderá escolher sua própria autoridade.
+O terminal interativo continua separado por representar uma ação direta do usuário.
+Tasks de runtimes externos usam um catálogo estritamente tipado: a seleção contém
+somente plugin e ID, o Rust consulta novamente a definição, deriva
+`ProcessAuthority` dos grants persistidos e entrega à interface um token opaco para
+revisão. O conjunto exato de grants é revalidado antes do consumo; mudança de
+workspace ou lifecycle do plugin invalida revisões e cancela execuções associadas.
 
 ## Riscos residuais
 
