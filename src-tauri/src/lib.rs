@@ -9,6 +9,7 @@ pub mod plugin_protocol;
 pub mod plugin_runtime;
 pub mod plugin_trust;
 pub mod plugins;
+pub mod process_broker;
 pub mod protocol;
 pub mod terminal;
 pub mod workspace;

@@ -1,8 +1,8 @@
 # Checkpoint de desenvolvimento
 
 Data: 2026-09-02
-Commit-base: `ca05c43`
-Estado: operações seguras de workspace do item #14 implementadas localmente.
+Commit-base: `abaf0b1`
+Estado: item #14 e aparência publicados; base do broker de processos do item #15 local.
 
 ## Direção consolidada
 
@@ -127,6 +127,20 @@ Estado: operações seguras de workspace do item #14 implementadas localmente.
   ao Explorer; rascunhos sujos bloqueiam mutações que os afetariam.
 - Toda mutação emite evento atribuído a `local_user`, com UUID, operação, paths e
   revisões quando aplicáveis. A ADR-0015 documenta contratos e risco TOCTOU residual.
+- O item #15 começou com um broker de processos em duas fases: revisão por token
+  opaco de uso único e execução do plano imutável, com autoridade independente para
+  escrita, rede e modo escalated.
+- Argv estruturado não passa por shell; scripts de shell são explícitos e exibidos
+  exatamente. Cwd e executáveis locais ficam sob a raiz, symlinks são recusados e o
+  environment parte vazio com allowlist curta.
+- Read-only e workspace-write exigem Bubblewrap funcional e falham fechados. O
+  sandbox nega rede por padrão, monta somente o necessário e possui diagnóstico
+  real; host escalated nunca é fallback automático.
+- Stdout/stderr são drenados concorrentemente com captura de 1 MiB por stream;
+  timeout e cancelamento encerram filhos/netos pelo grupo. Core, arquivos, memória,
+  descritores e forks têm limites, e a auditoria registra apenas SHA-256 do comando.
+- A ADR-0016 registra as decisões e os riscos residuais de cgroup/TOCTOU. A próxima
+  fatia do item #15 é ligar o broker a Tasks, grants e revisão na interface.
 
 ## Validações já executadas em 2026-09-02
 
@@ -135,7 +149,7 @@ Estado: operações seguras de workspace do item #14 implementadas localmente.
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --offline`
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`
-- `cargo test --workspace` (123 testes aprovados e 1 teste de integração
+- `cargo test --workspace` (137 testes aprovados e 1 teste de integração
   opcional ignorado por exigir Codex App Server local)
 - `cargo metadata --offline --no-deps --format-version 1`
 - `npm install --package-lock-only --ignore-scripts --offline --prefix ui`
@@ -166,11 +180,11 @@ dependências e não devem ser substituídas.
 
 1. preservar a decisão `GPL-3.0-only` em novos metadados e templates;
 2. continuar sem commit, push, publicação ou envio ao OBS sem autorização explícita;
-3. próximo item proposto: issue #15, “Implementar broker de processos, tasks,
-   sandbox e execução cancelável”.
+3. continuar a issue #15 conectando Tasks e aprovações tipadas ao broker, sem dar ao
+   frontend autoridade para escolher grants.
 
 ## Estado do repositório
 
-O commit `ca05c43` contém o manual para autores de plugins. As operações seguras de
-workspace do item #14 estão no worktree e ainda não foram commitadas. Nenhum pacote
-OBS ou release foi realizado.
+O commit `abaf0b1` contém as operações seguras do item #14 e as configurações de
+aparência. A base Rust do item #15 e sua documentação estão no worktree, ainda sem
+commit. Nenhum pacote OBS ou release foi realizado.

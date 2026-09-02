@@ -46,6 +46,10 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | Approval reaproveitada | vínculo ao hash da ação exibida |
 | Patch sobre arquivo alterado | precondition/hash e conflito explícito |
 | Processo continua após cancelamento | process group/job e cleanup |
+| Processo inunda stdout/stderr | drenagem concorrente e captura limitada por stream |
+| Fork bomb esgota o host | limite de processos; cgroup v2 planejado para quota por Task |
+| Environment global vaza segredo | `env_clear` e allowlist pequena controlada pelo núcleo |
+| Sandbox indisponível reduz proteção | falha fechada; host é modo escalated explícito, nunca fallback |
 | ANSI/Markdown injeta UI | sanitização e CSP |
 | Prompt injection em arquivo | conteúdo não amplia authority |
 | Plugin/backend comprometido | protocolo limitado e policy engine independente |
@@ -165,3 +169,12 @@ e a verificação das capabilities e permissões necessárias antes de alcançar
 adapter. O frontend recebe somente um resumo tipado do provider ativo e não
 seleciona autoridade pelo catálogo. Runtimes de IA sem adapter tipado são
 recusados, mesmo que seu handshake externo seja válido.
+
+O broker geral de processos agora possui revisão e execução separadas por token
+opaco de uso único. Cwd permanece sob o workspace sem symlinks, argv não passa por
+shell implícito e scripts de shell são exibidos exatamente. Modos somente leitura e
+workspace-write exigem Bubblewrap funcional e falham fechados; host escalated exige
+autoridade independente. Environment começa vazio, rede é negada por padrão, saída
+é drenada com captura limitada e cancelamento/timeout encerram o grupo de processos.
+Auditoria contém o hash do comando, nunca seu conteúdo. A integração dessa base com
+Tasks, grants de plugins e cartões de aprovação ainda está pendente.
