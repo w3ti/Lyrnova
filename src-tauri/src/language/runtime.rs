@@ -1,5 +1,7 @@
+#[cfg(test)]
+use super::configuration;
 use super::{
-    LanguageDocument, LanguageError, State, configuration, initialization, parse_diagnostics,
+    LanguageDocument, LanguageError, State, initialization, parse_diagnostics,
     protocol::{Decoder, frame},
     uri,
 };
@@ -86,7 +88,10 @@ fn configuration_masks(root: &Path) -> Result<Vec<PathBuf>, LanguageError> {
     Ok(masks)
 }
 
-pub(super) fn spawn(root: &Path) -> Result<Child, LanguageError> {
+pub(super) fn spawn(
+    root: &Path,
+    environment: &super::environment::Environment,
+) -> Result<Child, LanguageError> {
     let server = server_path(root)?;
     let masks = configuration_masks(root)?;
     if !Path::new("/usr/bin/bwrap").is_file() {
@@ -111,6 +116,19 @@ pub(super) fn spawn(root: &Path) -> Result<Child, LanguageError> {
     ] {
         command.args(["--setenv", key, value]);
     }
+    let prefix = environment.prefix();
+    command.args(["--setenv", "PATH", &format!("{prefix}/bin:/usr/bin:/bin")]);
+    command.args(["--setenv", "RUSTC", &format!("{prefix}/bin/rustc")]);
+    command.args(["--setenv", "CARGO", &format!("{prefix}/bin/cargo")]);
+    command.args(["--setenv", "RUSTFMT", &format!("{prefix}/bin/rustfmt")]);
+    command.args([
+        "--setenv",
+        "RUSTC_WRAPPER",
+        "",
+        "--setenv",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "",
+    ]);
     for path in ["/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache"] {
         if Path::new(path).exists() {
             command.args(["--ro-bind", path, path]);
@@ -137,6 +155,20 @@ pub(super) fn spawn(root: &Path) -> Result<Child, LanguageError> {
         .arg("--ro-bind")
         .arg(root)
         .arg("/workspace");
+    if environment.toolchain.id != "system" {
+        command
+            .arg("--ro-bind")
+            .arg(&environment.toolchain.path)
+            .arg("/toolchain");
+    }
+    command.args(["--dir", "/tmp/cargo/registry"]);
+    for path in &environment.registry {
+        let name = path.file_name().ok_or(LanguageError::ReviewExpired)?;
+        command
+            .arg("--ro-bind")
+            .arg(path)
+            .arg(Path::new("/tmp/cargo/registry").join(name));
+    }
     for path in masks {
         let target = Path::new("/workspace").join(
             path.strip_prefix(root)
@@ -223,7 +255,7 @@ impl Output {
     }
 }
 
-fn respond(message: &Value, output: &mut Output) -> Result<(), LanguageError> {
+fn respond(message: &Value, output: &mut Output, config: &Value) -> Result<(), LanguageError> {
     let id = &message["id"];
     if !(id.is_i64() || id.as_str().is_some_and(|s| s.len() <= 128)) {
         return Err(LanguageError::ProtocolViolation);
@@ -231,11 +263,10 @@ fn respond(message: &Value, output: &mut Output) -> Result<(), LanguageError> {
     match message["method"].as_str() {
         Some("workspace/configuration") => {
             let items = message["params"]["items"].as_array().filter(|v| v.len() <= 64).ok_or(LanguageError::ProtocolViolation)?;
-            let config = configuration();
             let values: Vec<_> = items.iter().map(|item| {
                 let section = item["section"].as_str().unwrap_or("rust-analyzer");
                 if section == "rust-analyzer" { return config.clone(); }
-                section.strip_prefix("rust-analyzer.").map(|key| key.split('.').fold(&config, |value, part| &value[part]).clone()).unwrap_or(Value::Null)
+                section.strip_prefix("rust-analyzer.").map(|key| key.split('.').fold(config, |value, part| &value[part]).clone()).unwrap_or(Value::Null)
             }).collect();
             output.push(json!({"jsonrpc":"2.0", "id":id, "result":values}))
         }
@@ -252,7 +283,12 @@ fn handle(
     output: &mut Output,
 ) -> Result<(), LanguageError> {
     if message.get("method").is_some() && message.get("id").is_some() {
-        return respond(&message, output);
+        let config = state
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?
+            .configuration
+            .clone();
+        return respond(&message, output, &config);
     }
     if message.get("method").is_none() && message.get("id") == Some(&json!(1)) {
         if *initialized || message.get("error").is_some() {
@@ -270,13 +306,42 @@ fn handle(
         }
         output.push(json!({"jsonrpc":"2.0", "method":"initialized", "params":{}}))?;
         *initialized = true;
-        state
-            .lock()
-            .map_err(|_| LanguageError::StateUnavailable)?
-            .snapshot
-            .state = "running".into();
+        let mut state = state.lock().map_err(|_| LanguageError::StateUnavailable)?;
+        if state.snapshot.state != "outdated" {
+            state.snapshot.state = "running".into();
+        }
+        state.queries.hover = caps["hoverProvider"] == true || caps["hoverProvider"].is_object();
+        state.queries.definition =
+            caps["definitionProvider"] == true || caps["definitionProvider"].is_object();
+        state.queries.completion =
+            caps["completionProvider"] == true || caps["completionProvider"].is_object();
+        state.queries.references =
+            caps["referencesProvider"] == true || caps["referencesProvider"].is_object();
+        state.queries.rename = caps["renameProvider"] == true || caps["renameProvider"].is_object();
+        state.queries.formatting = caps["documentFormattingProvider"] == true
+            || caps["documentFormattingProvider"].is_object();
+    } else if *initialized && message.get("method").is_none() {
+        if let Some(id) = message["id"].as_u64() {
+            state
+                .lock()
+                .map_err(|_| LanguageError::StateUnavailable)?
+                .queries
+                .respond(id, &message);
+        }
+    } else if *initialized && message["method"] == "experimental/serverStatus" {
+        let mut state = state.lock().map_err(|_| LanguageError::StateUnavailable)?;
+        state.snapshot.analysis_message = if message["params"]["health"] == "ok" {
+            None
+        } else {
+            message["params"]["message"]
+                .as_str()
+                .map(|text| text.chars().filter(|c| *c != '\0').take(4096).collect())
+        };
     } else if *initialized && message["method"] == "textDocument/publishDiagnostics" {
         let mut state = state.lock().map_err(|_| LanguageError::StateUnavailable)?;
+        if state.snapshot.state == "outdated" {
+            return Ok(());
+        }
         if let Some(mut diagnostics) = parse_diagnostics(&message["params"], &state.documents) {
             state
                 .snapshot
@@ -304,11 +369,8 @@ fn synchronize(
     sent: &mut BTreeMap<String, Arc<LanguageDocument>>,
     output: &mut Output,
 ) -> Result<(), LanguageError> {
-    let docs = state
-        .lock()
-        .map_err(|_| LanguageError::StateUnavailable)?
-        .documents
-        .clone();
+    let mut state = state.lock().map_err(|_| LanguageError::StateUnavailable)?;
+    let docs = state.documents.clone();
     for path in sent.keys().filter(|p| !docs.contains_key(*p)) {
         output.push(json!({"jsonrpc":"2.0", "method":"textDocument/didClose", "params":{"textDocument":{"uri":uri(path)}}}))?;
     }
@@ -320,6 +382,9 @@ fn synchronize(
         }
     }
     *sent = docs;
+    for message in state.queries.messages() {
+        output.push(message)?;
+    }
     Ok(())
 }
 
@@ -333,7 +398,13 @@ fn session_loop(
     nonblocking(stdin.as_raw_fd())?;
     nonblocking(stdout.as_raw_fd())?;
     let mut output = Output::default();
-    output.push(initialization())?;
+    let mut initialize = initialization();
+    initialize["params"]["initializationOptions"] = state
+        .lock()
+        .map_err(|_| LanguageError::StateUnavailable)?
+        .configuration
+        .clone();
+    output.push(initialize)?;
     let mut decoder = Decoder::default();
     let mut initialized = false;
     let started = Instant::now();
@@ -424,6 +495,7 @@ pub(super) fn run(mut child: Child, state: Arc<Mutex<State>>, cancel: Arc<Atomic
     let _ = child.kill();
     let _ = child.wait();
     if let Ok(mut state) = state.lock() {
+        state.queries.stop();
         state.snapshot.diagnostics.clear();
         state.snapshot.state = if cancel.load(Ordering::Acquire) {
             "stopped"
@@ -467,7 +539,7 @@ mod tests {
             "workspace/applyEdit",
         ] {
             let mut output = Output::default();
-            respond(&json!({"jsonrpc":"2.0", "id":99, "method":method, "params":{"command":"sh", "edit":{}}}), &mut output).unwrap();
+            respond(&json!({"jsonrpc":"2.0", "id":99, "method":method, "params":{"command":"sh", "edit":{}}}), &mut output, &configuration()).unwrap();
             let mut decoder = Decoder::default();
             decoder.push(&output.queue.pop_front().unwrap()).unwrap();
             let response = decoder.next().unwrap().unwrap();
@@ -482,7 +554,7 @@ mod tests {
     #[test]
     fn configuration_replies_cannot_enable_project_code_execution() {
         let mut output = Output::default();
-        respond(&json!({"id":"config", "method":"workspace/configuration", "params":{"items":[{"section":"rust-analyzer"},{"section":"rust-analyzer.procMacro.enable"},{"section":"other"}]}}), &mut output).unwrap();
+        respond(&json!({"id":"config", "method":"workspace/configuration", "params":{"items":[{"section":"rust-analyzer"},{"section":"rust-analyzer.procMacro.enable"},{"section":"other"}]}}), &mut output, &configuration()).unwrap();
         let mut decoder = Decoder::default();
         decoder.push(&output.queue.pop_front().unwrap()).unwrap();
         let response = decoder.next().unwrap().unwrap();

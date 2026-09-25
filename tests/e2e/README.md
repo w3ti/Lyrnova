@@ -97,3 +97,43 @@ identificado entre os descendentes do driver isolado. O arquivo fonte e o marcad
 de `build.rs` verificam ausência de escrita/execução de build na fixture, inclusive
 com um `rust-analyzer.toml` que tenta habilitá-lo. Isso não certifica toolchains,
 dependências externas, biblioteca padrão, projetos grandes ou todas as configurações.
+
+A análise requer Cargo e rustc da distribuição em `/usr/bin`, visíveis no sandbox.
+A jornada Rust também cobre hover pelo Monaco (Ctrl+K, Ctrl+I), conteúdo inerte
+e F12 abrindo a definição em uma aba ainda não carregada. Testes de concorrência
+e cancelamento dos providers podem ser executados com `npm test --prefix ui`.
+
+A jornada de ambiente usa Cargo/rustc reais copiados para uma estrutura temporária
+de toolchain e registry isolado com crate de teste. Ela revisa a seleção pelo
+produto e exercita F12 externo sem escrita em fonte/lockfile. `--rust-src` pode
+apontar para o diretório `library` de uma instalação rust-src compatível para
+validar a biblioteca padrão; o CI usa o pacote da distribuição. Exemplo local:
+`--rust-src /usr/lib/rustlib/src/rust/library`. A ausência dessa opção não homologa
+resolução de std/core. A evidência local desta fase fica em `target/e2e-environment`.
+
+## Ações de edição Rust
+
+A fixture também precisa de `/usr/bin/rustfmt`; o runner copia o binário real para
+a toolchain temporária. O gate testa Ctrl+Espaço e aceitação de completion,
+Shift+F12 com navegação, F2 alterando chamada e definição num arquivo antes fechado,
+e Shift+Alt+F com formatação real. Verifica ausência de gravação em disco e desfazer
+por arquivo. Há testes unitários adicionais para sobreposição/UTF-16, versões,
+operações proibidas, cancelamento e preparação integral dos rascunhos. Evidência
+local: `target/e2e-rust-actions/report.json`.
+
+## Mudanças externas no projeto
+
+A jornada cria, substitui, renomeia e exclui arquivos pelo filesystem, sem acionar
+refresh no produto. Verifica abas limpas ativas/inativas, preservação de rascunhos,
+conflito antes de salvar, reload explícito, recriação, substituição binária e save
+próprio sem falso conflito. Requests de polling/leitura para outro workspace são
+recusados. Com Rust, uma fonte fechada muda de tipo e linha; a análise reinicia,
+hover/definição refletem o novo disco e o rascunho do chamador permanece intacto.
+A evidência local fica em `target/e2e-watch/report.json`.
+
+Se a combinação local de tauri-driver/WebKitWebDriver encerrar conexões no proxy,
+`--direct-native` mantém a criação de sessões e o lifecycle no tauri-driver, mas
+envia comandos da sessão diretamente à porta nativa. O relatório registra
+`commandTransport`; não há retry implícito de clicks/comandos que poderiam ter
+sido executados antes de perder a resposta. Esse modo exercita o mesmo binário,
+WebView e IPC reais. O modo padrão do CI permanece passando pelo proxy.

@@ -3,6 +3,10 @@
 - Data: 2026-09-25
 - Estado: implementado localmente; sem publicação
 
+A [ADR-0023](ADR-0023-rust-toolchains-and-local-dependencies.md) amplia os mounts e
+metadados mediante revisão de toolchain/cache. Este documento registra o adaptador
+inicial, cujas restrições de sysroot/dependências foram parcialmente superadas.
+
 ## Decisão e escopo
 
 O plugin Rust embutido 0.1.1 declara `lsp`, `diagnostics`, `workspace_read` e
@@ -84,7 +88,8 @@ pelo estado corrente. São exibidos até 200 diagnósticos por arquivo e mil no 
 com mensagens de até 4 KiB e indicação de truncamento. Paths, revisões, ranges,
 severidades e conteúdo são validados antes de chegar à interface.
 
-Definição, referências, hover, completion LSP, rename, formatação, DAP, download
+Definição e hover foram adicionados pela [ADR-0022](ADR-0022-rust-symbol-queries.md).
+Referências, completion LSP, rename, formatação, DAP, download
 de toolchains, caches externos e outras plataformas continuam pendentes. Estado
 LSP não é persistido: um novo processo autorizado analisa a sessão recuperada.
 

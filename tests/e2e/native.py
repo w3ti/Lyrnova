@@ -20,6 +20,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,15 +43,16 @@ def free_port():
 
 
 class Browser:
-    def __init__(self, url):
+    def __init__(self, url, command_url=None):
         self.url = url
+        self.command_url = command_url or url
         self.session = None
         # Never route localhost WebDriver traffic through a proxy.
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def request(self, method, path, data=None):
         request = urllib.request.Request(
-            self.url + path, method=method,
+            (self.url if path in ("/session", "/status") else self.command_url) + path, method=method,
             data=None if data is None else json.dumps(data).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -382,13 +384,203 @@ def rust_server_pids(driver_pid):
         family = expanded
 
 
+def exercise_rust_environment(browser, workspace, report, valid):
+    old_session = browser.script('return document.querySelector("#language-status").dataset.sessionId')
+    root = workspace.parent
+    cache = root / "cargo/registry/src/native"
+    (workspace / "Cargo.toml").write_text('[package]\nname = "native_lsp"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlyrnova_fixture_dep = "=1.0.0"\n')
+    (workspace / ".cargo").mkdir(exist_ok=True)
+    (workspace / ".cargo/config.toml").write_text('[source.crates-io]\nreplace-with = "fixture"\n[source.fixture]\ndirectory = "/tmp/cargo/registry/src/native"\n')
+    env = os.environ.copy()
+    env["CARGO_HOME"] = str(root / "cargo")
+    subprocess.run(["/usr/bin/cargo", "generate-lockfile", "--offline", "--config", f'source.fixture.directory="{cache}"'], cwd=workspace, env=env, check=True, capture_output=True)
+    original_lock = (workspace / "Cargo.lock").read_bytes()
+    browser.until(f'document.querySelector("#language-status").dataset.state === "running" && document.querySelector("#language-status").dataset.sessionId !== "{old_session}"', "Cargo changes refresh Rust analysis automatically")
+    browser.click('#language-environment')
+    browser.until('document.querySelector("#language-toolchain").options.length > 0', "installed toolchain choices")
+    assert not browser.script('return document.querySelector("#language-registry").checked')
+    browser.click('#language-environment-cancel')
+    snapshot = browser.invoke("language_status", {"sessionId": browser.script('return document.querySelector("#language-status").dataset.sessionId')})
+    assert not snapshot["environment"]["registry"], snapshot
+    browser.click('#language-environment')
+    browser.until('!!document.querySelector(\'#language-toolchain option[value="rustup:fixture-toolchain"]\')', "installed rustup toolchain")
+    browser.script('const select = document.querySelector("#language-toolchain"); select.value = "rustup:fixture-toolchain"; select.dispatchEvent(new Event("change"));')
+    browser.click('#language-registry')
+    browser.click('#language-environment-apply')
+    browser.until('!document.querySelector("#language-environment-dialog").open && document.querySelector("#language-status").dataset.state === "running"', "reviewed environment initialized")
+    session = browser.script('return document.querySelector("#language-status").dataset.sessionId')
+    snapshot = browser.invoke("language_status", {"sessionId": session})
+    assert snapshot["environment"]["toolchain"] == "fixture-toolchain", snapshot
+    assert snapshot["environment"]["registry"] and snapshot["environment"]["dependencies"], snapshot
+    previous = wait_for(lambda: next((d for d in browser.invoke("language_status", {"sessionId": session})["diagnostics"] if d["path"] == "src/lib.rs"), None), "configured server receives existing draft", timeout=40)
+    code = valid + 'pub fn cached() -> u32 { lyrnova_fixture_dep::cached_answer() }\n'
+    if snapshot["environment"]["standardLibrary"]:
+        code += 'pub fn standard() -> core::option::Option<u32> { None }\n'
+    browser.type('#source-editor textarea.inputarea', code, replace=True)
+    def query(kind, line, symbol):
+        state = browser.invoke("language_status", {"sessionId": session})
+        document = next((d for d in state["diagnostics"] if d["path"] == "src/lib.rs"), None)
+        if not document or document["version"] <= previous["version"]:
+            return None
+        result = browser.invoke("language_query", {"sessionId": session, "query": {"requestId": str(uuid.uuid4()), "kind": kind, "path": "src/lib.rs", "version": document["version"], "position": {"line": line, "character": code.splitlines()[line].index(symbol) + 1}}})
+        return result["value"] or None
+    locations = wait_for(lambda: query("definition", 2, "cached_answer"), "cached crate definition", timeout=40)
+    assert "CACHE_SOURCE_SENTINEL" in locations[0]["source"]["content"], locations
+    hover = wait_for(lambda: query("hover", 2, "cached_answer"), "cached crate hover", timeout=30)
+    assert "u32" in hover["text"], hover
+    browser.script("""
+        const input = document.querySelector('#source-editor textarea.inputarea'); input.focus();
+        const key = (key, code, keyCode, ctrlKey = false) => input.dispatchEvent(new KeyboardEvent('keydown', {key,code,keyCode,which:keyCode,ctrlKey,bubbles:true,cancelable:true}));
+        key('Home','Home',36,true); key('ArrowDown','ArrowDown',40); key('ArrowDown','ArrowDown',40); key('Home','Home',36);
+        for(let i=0;i<arguments[0];i++) key('ArrowRight','ArrowRight',39);
+        key('F12','F12',123);
+    """, code.splitlines()[2].index("cached_answer") + 1)
+    browser.until('document.querySelector("#language-source-dialog").open && document.querySelector("#language-source-editor").textContent.includes("CACHE_SOURCE_SENTINEL")', "external source read-only viewer")
+    assert browser.script('return document.querySelector("#language-source-editor textarea").readOnly')
+    browser.click('#language-source-close')
+    if snapshot["environment"]["standardLibrary"]:
+        standard = wait_for(lambda: query("definition", 3, "Option"), "standard library definition", timeout=40)
+        assert "pub enum Option" in standard[0]["source"]["content"], standard
+        report["checks"].append("installed standard library sources resolved through real rust-analyzer")
+    assert (workspace / "Cargo.lock").read_bytes() == original_lock
+    assert (root / "cargo/credentials.toml").read_text() == "PRIVATE_CREDENTIAL_SENTINEL"
+    assert not (workspace / "build-script-executed").exists()
+    browser.type('#source-editor textarea.inputarea', valid, replace=True)
+    report["checks"].append("reviewed installed toolchain and offline registry cache; external definitions read-only; no lockfile or source writes")
+
+
+def exercise_workspace_watch(browser, workspace, report):
+    first = workspace / 'watch-first.txt'
+    second = workspace / 'watch-second.txt'
+    first.write_text('first disk text\n')
+    second.write_text('second disk text\n')
+    browser.click('[data-activity="explorer"]')
+    browser.until("""!!document.querySelector('[data-file="watch-first.txt"]') && !!document.querySelector('[data-file="watch-second.txt"]')""", 'external creation updates Explorer automatically')
+    browser.click('[data-file="watch-first.txt"]')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("first disk")', 'first watched tab')
+    browser.click('[data-file="watch-second.txt"]')
+    second.write_text('active tab changed externally\n')
+    first.write_text('inactive tab changed externally\n')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("active tab changed") && document.querySelector("#editor-workspace").dataset.clean === "true"', 'active clean tab automatically reloads')
+    browser.click('[data-editor-path="watch-first.txt"]')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("inactive tab changed")', 'inactive clean tab automatically reloads')
+    browser.type('#source-editor textarea.inputarea','local draft stays',replace=True)
+    first.write_text('external conflicting version\n')
+    browser.until('!document.querySelector("#editor-recovery").hidden', 'dirty tab reports external conflict before Save')
+    assert browser.script('return document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("local draft stays")')
+    browser.click('[data-action="save-document"]')
+    assert first.read_text() == 'external conflicting version\n'
+    browser.click('#recovery-reload')
+    browser.until('document.querySelector("#editor-recovery").hidden && document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("external conflicting")', 'explicit reload resolves watched conflict')
+    first.unlink()
+    browser.until("""!document.querySelector("#editor-recovery").hidden && !document.querySelector('[data-file="watch-first.txt"]')""", 'external deletion preserves open document')
+    assert browser.script('return document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("external conflicting")')
+    first.write_text('external conflicting version\n')
+    browser.until('document.querySelector("#editor-recovery").hidden', 'recreated matching file clears conflict safely')
+    browser.type('#source-editor textarea.inputarea','saved by editor',replace=True)
+    browser.click('[data-action="save-document"]')
+    wait_for(lambda:first.read_text()=='saved by editor','explicit save while watcher runs')
+    time.sleep(2)
+    assert browser.script('return document.querySelector("#editor-recovery").hidden && document.querySelector("#editor-workspace").dataset.clean === "true"')
+    first.write_bytes(b'binary\x00content')
+    browser.until('!document.querySelector("#editor-recovery").hidden', 'binary replacement preserves draft')
+    assert browser.script('return document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("saved by editor")')
+    browser.click('[data-close-editor-path="watch-first.txt"]')
+    renamed = workspace / 'watch-renamed.txt'
+    second.rename(renamed)
+    browser.until("""!!document.querySelector('[data-file="watch-renamed.txt"]') && !document.querySelector('[data-file="watch-second.txt"]') && !document.querySelector("#editor-recovery").hidden""", 'external rename updates tree and preserves old tab')
+    browser.click('[data-close-editor-path="watch-second.txt"]')
+    for command, args in [('workspace_poll',{'workspace':str(workspace.parent),'token':None,'paths':[]}),('workspace_read_current',{'workspace':str(workspace.parent),'path':'watch-renamed.txt'})]:
+        try: browser.invoke(command,args)
+        except AssertionError: pass
+        else: raise AssertionError('Watcher accepted another workspace')
+    first.unlink(); renamed.unlink()
+    report['checks'].append('external creation/rename/deletion updates Explorer; clean active/inactive tabs reload; dirty/binary/deleted drafts preserved')
+    report['checks'].append('watcher conflicts precede save, explicit reload and recreation resolve safely, own save does not conflict; workspace-scoped reads')
+
+
+
+def exercise_rust_actions(browser, workspace, report, valid, session):
+    def key(key, code, number, ctrl=False, shift=False, alt=False, selector='#source-editor textarea.inputarea'):
+        browser.script("""
+            const input = document.querySelector(arguments[6]); input.focus();
+            input.dispatchEvent(new KeyboardEvent('keydown', {key:arguments[0],code:arguments[1],keyCode:arguments[2],which:arguments[2],ctrlKey:arguments[3],shiftKey:arguments[4],altKey:arguments[5],bubbles:true,cancelable:true}));
+        """, key, code, number, ctrl, shift, alt, selector)
+    def position(line, character):
+        key('Home', 'Home', 36, ctrl=True)
+        for _ in range(line): key('ArrowDown', 'ArrowDown', 40)
+        key('Home', 'Home', 36)
+        for _ in range(character): key('ArrowRight', 'ArrowRight', 39)
+    def version():
+        return browser.invoke('language_status', {'sessionId':session})['documentVersions'].get('src/lib.rs', 0)
+    def replace(text):
+        before = version()
+        browser.type('#source-editor textarea.inputarea', text, replace=True)
+        return wait_for(lambda: (v if (v := version()) > before else None), 'new action draft synchronized', timeout=30)
+    def query(kind, revision, line, character, **extra):
+        return browser.invoke('language_query', {'sessionId':session,'query':{'requestId':str(uuid.uuid4()),'kind':kind,'path':'src/lib.rs','version':revision,'position':{'line':line,'character':character},**extra}})['value']
+    partial = 'mod helper;\npub fn answer() -> i32 { helper::tar }\n'
+    revision = replace(partial)
+    column = partial.splitlines()[1].index('tar') + 3
+    completions = query('completion', revision, 1, column)
+    assert any('target' in item['label'] for item in completions['items']), completions
+    position(1, column); key(' ', 'Space', 32, ctrl=True)
+    browser.until('document.querySelector(".suggest-widget")?.textContent.includes("target")', 'real Rust completion popup')
+    key('Enter', 'Enter', 13)
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("target()")', 'completion insertion')
+    key('Escape','Escape',27)
+    assert (workspace/'src/lib.rs').read_text() == valid
+    report['checks'].append('Rust semantic completion via IPC and Ctrl+Space; accepted into unsaved draft')
+
+    revision = replace(valid)
+    column = valid.splitlines()[1].index('target') + 1
+    refs = query('references', revision, 1, column)
+    assert {item['path'] for item in refs} == {'src/lib.rs','src/helper.rs'}, refs
+    position(1, column); key('F12','F12',123,shift=True)
+    browser.until('document.querySelector("#rust-references-dialog").open && document.querySelectorAll(".rust-reference-item").length === 2', 'Shift+F12 reference list')
+    browser.script('Array.from(document.querySelectorAll(".rust-reference-item")).find(b=>b.textContent.includes("helper.rs")).click()')
+    browser.until('document.querySelector("#cursor-position").textContent === "Ln 2, Col 8"', 'reference navigation')
+    browser.click('[data-close-editor-path="src/helper.rs"]')
+    browser.click('[data-editor-path="src/lib.rs"]')
+    report['checks'].append('Rust references across files via IPC and Shift+F12 with source navigation')
+
+    position(1, column); key('F2','F2',113)
+    browser.until('!!document.querySelector(".rename-input")?.getClientRects().length', 'F2 rename input')
+    browser.type('.rename-input','renamed_target',replace=True)
+    key('Enter','Enter',13,selector='.rename-input')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("renamed_target") && !!document.querySelector("[data-editor-path=\\\"src/helper.rs\\\"]")', 'rename changes caller and opens closed target draft')
+    browser.click('[data-editor-path="src/helper.rs"]')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("renamed_target")', 'closed file received rename')
+    assert 'renamed_target' not in (workspace/'src/helper.rs').read_text()
+    assert (workspace/'src/lib.rs').read_text() == valid
+    key('z','KeyZ',90,ctrl=True)
+    browser.until('!document.querySelector("#source-editor .view-lines").textContent.includes("renamed_target")', 'rename undo in target')
+    browser.click('[data-close-editor-path="src/helper.rs"]')
+    browser.click('[data-editor-path="src/lib.rs"]')
+    replace(valid)
+    report['checks'].append('F2 rename updates caller and closed-file drafts, keeps disk unchanged and supports undo')
+
+    compact = 'mod helper;\npub fn answer()->i32{helper::target()}\n'
+    revision = replace(compact)
+    formatting = query('formatting', revision, 0, 0)
+    assert formatting, formatting
+    key('F','KeyF',70,shift=True,alt=True)
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("pub fn answer() -> i32 {")', 'Shift+Alt+F applies rustfmt')
+    assert (workspace/'src/lib.rs').read_text() == valid
+    key('z','KeyZ',90,ctrl=True)
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("answer()->i32")', 'format undo')
+    replace(valid)
+    report['checks'].append('rustfmt via IPC and Shift+Alt+F formats only the draft; undo restores original')
+
+
 def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
-    valid = 'pub fn answer() -> i32 { 42 }\n'
+    valid = 'mod helper;\npub fn answer() -> i32 { helper::target() }\n'
     invalid = 'pub fn answer() { let _ = "🦀"; let value = ; }\n'
     (workspace / "Cargo.toml").write_text('[package]\nname = "native_lsp"\nversion = "0.1.0"\nedition = "2021"\n')
     (workspace / "rust-analyzer.toml").write_text('checkOnSave = true\n[cargo.buildScripts]\nenable = true\n')
     (workspace / "src").mkdir(exist_ok=True)
     (workspace / "src/lib.rs").write_text(valid)
+    (workspace / "src/helper.rs").write_text('/// Returns the fixture answer. [run](command:evil) ![image](https://example.invalid/a.png) <img src="https://example.invalid/b.png">\npub fn target() -> i32 { 42 }\n')
     (workspace / "build.rs").write_text('fn main() { std::fs::write("build-script-executed", "BAD").unwrap(); }\n')
     try:
         browser.invoke("language_start", {"workspace": str(workspace), "restart": False})
@@ -397,8 +589,7 @@ def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
     else:
         raise AssertionError("Rust server started without reviewed permissions")
     browser.click('[data-activity="explorer"]')
-    browser.click('[data-action="refresh-files"]')
-    browser.until('!!document.querySelector(\'[data-file="src/lib.rs"]\')', "Rust file in tree")
+    browser.until('!!document.querySelector(\'[data-file="src/lib.rs"]\')', "watcher adds Rust file to tree")
     browser.click('[data-file="src/lib.rs"]')
     browser.until('document.querySelector("#source-editor .view-lines")?.textContent.includes("answer")', "Rust document opened")
     browser.click('[data-dock-view="problems"]')
@@ -436,6 +627,62 @@ def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
         assert "invalid_document" in str(error), str(error)
     else:
         raise AssertionError("LSP accepted an old document version")
+    # Exercise production IPC and then the registered Monaco providers through keyboard handlers.
+    corrected = next(d for d in browser.invoke("language_status", {"sessionId": session})["diagnostics"] if d["path"] == "src/lib.rs")
+    position = {"line": 1, "character": valid.splitlines()[1].index("target") + 1}
+    def symbol(kind):
+        return browser.invoke("language_query", {"sessionId": session, "query": {
+            "requestId": str(uuid.uuid4()), "kind": kind, "path": "src/lib.rs",
+            "version": corrected["version"], "position": position,
+        }})
+    definition = wait_for(lambda: (result if (result := symbol("definition"))["value"] else None), "Rust cross-file definition", timeout=30)
+    assert definition["value"][0]["path"] == "src/helper.rs", definition
+    assert definition["value"][0]["range"]["start"] == {"line": 1, "character": 7}, definition
+    hover = wait_for(lambda: (result if (result := symbol("hover"))["value"] else None), "Rust hover", timeout=30)
+    assert "target" in hover["value"]["text"] and "i32" in hover["value"]["text"], hover
+    assert "fixture answer" in hover["value"]["text"], hover
+    browser.script("""
+        const input = document.querySelector('#source-editor textarea.inputarea'); input.focus();
+        const key = (key, code, keyCode, ctrlKey = false) => input.dispatchEvent(new KeyboardEvent('keydown', {key, code, keyCode, which:keyCode, ctrlKey, bubbles:true, cancelable:true}));
+        key('Home', 'Home', 36, true); key('ArrowDown', 'ArrowDown', 40); key('Home', 'Home', 36);
+        for (let i=0; i<arguments[0]; i++) key('ArrowRight', 'ArrowRight', 39);
+        key('k', 'KeyK', 75, true); key('i', 'KeyI', 73, true);
+    """, position["character"])
+    browser.until('document.querySelector(".monaco-hover")?.textContent.includes("fixture answer")', "Monaco hover provider")
+    assert browser.script('return !!document.querySelector(".monaco-hover .markdown-hover")')
+    assert browser.script('return document.querySelectorAll(".monaco-hover .markdown-hover a, .monaco-hover .markdown-hover img").length') == 0
+    browser.script("""
+        const input = document.querySelector('#source-editor textarea.inputarea'); input.focus();
+        for (const [key, code, keyCode] of [['Escape', 'Escape', 27], ['F12', 'F12', 123]])
+            input.dispatchEvent(new KeyboardEvent('keydown', {key, code, keyCode, which:keyCode, bubbles:true, cancelable:true}));
+    """)
+    browser.until('!!document.querySelector(\'[data-editor-path="src/helper.rs"]\') && document.querySelector("#cursor-position").textContent === "Ln 2, Col 8"', "F12 opens definition in another tab")
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g, " ").includes("fixture answer")', "definition source rendered")
+    browser.click('[data-close-editor-path="src/helper.rs"]')
+    browser.click('[data-editor-path="src/lib.rs"]')
+    report["checks"].append("Rust hover and cross-file definition via real IPC and Monaco keyboard handlers")
+    exercise_rust_actions(browser, workspace, report, valid, session)
+    browser.type('#source-editor textarea.inputarea', valid + '// draft survives external edits\n', replace=True)
+    helper = workspace / 'src/helper.rs'
+    original_helper = helper.read_text()
+    helper.write_text('\n' + original_helper.replace('-> i32', '-> i64'))
+    browser.until(f'document.querySelector("#language-status").dataset.state === "running" && document.querySelector("#language-status").dataset.sessionId !== "{session}"', 'closed Rust source change refreshes analysis')
+    fresh_session = browser.script('return document.querySelector("#language-status").dataset.sessionId')
+    def fresh_symbol(kind):
+        snapshot = browser.invoke('language_status', {'sessionId':fresh_session})
+        revision = snapshot['documentVersions'].get('src/lib.rs')
+        if not revision: return None
+        return browser.invoke('language_query', {'sessionId':fresh_session,'query':{'requestId':str(uuid.uuid4()),'kind':kind,'path':'src/lib.rs','version':revision,'position':position}})['value']
+    hover = wait_for(lambda: (h if (h := fresh_symbol('hover')) and 'i64' in h['text'] else None), 'hover reflects external type change', timeout=30)
+    definitions = fresh_symbol('definition')
+    assert definitions[0]['range']['start']['line'] == 2, definitions
+    assert browser.script('return document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("draft survives")')
+    assert (workspace/'src/lib.rs').read_text() == valid
+    helper.write_text(original_helper)
+    browser.type('#source-editor textarea.inputarea', valid, replace=True)
+    browser.until(f'document.querySelector("#language-status").dataset.state === "running" && document.querySelector("#language-status").dataset.sessionId !== "{fresh_session}"', 'restored Rust source analyzed')
+    session = browser.script('return document.querySelector("#language-status").dataset.sessionId')
+    report['checks'].append('external closed Rust source invalidates old queries, updates hover/definition and preserves unsaved caller')
     browser.click('#language-restart')
     browser.until(f'document.querySelector("#language-status").dataset.state === "running" && document.querySelector("#language-status").dataset.sessionId !== "{session}"', "Rust server restart")
     try:
@@ -458,6 +705,8 @@ def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
     servers = wait_for(lambda: rust_server_pids(driver_pid), "restarted server process")
     report["checks"].append("real Rust server crash clears diagnostics, preserves editing and recovers on restart")
 
+    exercise_rust_environment(browser, workspace, report, valid)
+    servers = wait_for(lambda: rust_server_pids(driver_pid), "configured server before revocation")
     browser.click('[data-activity="settings"]')
     browser.click('[data-plugin-toggle="io.github.w3ti.lyrnova.language.rust"]')
     browser.until('!document.querySelector("#language-enable").hidden', "Rust plugin deactivation clears analysis")
@@ -483,6 +732,8 @@ def main():
     parser.add_argument("--native-driver", default="WebKitWebDriver")
     parser.add_argument("--fixture", type=Path, default=ROOT / "target/debug/examples/e2e_fixture")
     parser.add_argument("--rust-analyzer", type=Path, help="Standalone ELF server to exercise real Rust LSP diagnostics")
+    parser.add_argument("--rust-src", type=Path, help="Optional installed Rust library source directory for standard-library validation")
+    parser.add_argument("--direct-native", action="store_true", help="Send session commands directly to the native driver; tauri-driver still creates sessions and owns the driver lifecycle")
     parser.add_argument("--output", type=Path, default=ROOT / "target/e2e")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -516,6 +767,22 @@ def main():
         # Match the tested CI backend (XWayland locally, Xvfb in CI).
         env["GDK_BACKEND"] = "x11"
         if args.rust_analyzer:
+            toolchain = root / "rustup/toolchains/fixture-toolchain"
+            (toolchain / "bin").mkdir(parents=True)
+            for name in ["cargo", "rustc", "rustfmt"]:
+                shutil.copy2(Path("/usr/bin") / name, toolchain / "bin" / name)
+            if args.rust_src:
+                shutil.copytree(args.rust_src, toolchain / "lib/rustlib/src/rust/library", symlinks=True)
+            for name in ["cache", "index", "src"]:
+                (root / "cargo/registry" / name).mkdir(parents=True, exist_ok=True)
+            crate = root / "cargo/registry/src/native/lyrnova_fixture_dep-1.0.0"
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text('[package]\nname = "lyrnova_fixture_dep"\nversion = "1.0.0"\nedition = "2021"\n')
+            (crate / "src/lib.rs").write_text('/// CACHE_SOURCE_SENTINEL\npub fn cached_answer() -> u32 { 42 }\n')
+            (crate / ".cargo-checksum.json").write_text('{"files":{},"package":null}')
+            (root / "cargo/credentials.toml").write_text("PRIVATE_CREDENTIAL_SENTINEL")
+            env["CARGO_HOME"] = str(root / "cargo")
+            env["RUSTUP_HOME"] = str(root / "rustup")
             tools_dir = root / "tools"
             tools_dir.mkdir()
             (tools_dir / "rust-analyzer").symlink_to(args.rust_analyzer.resolve(strict=True))
@@ -523,7 +790,8 @@ def main():
         port, native_port = free_port(), free_port()
         while native_port == port:
             native_port = free_port()
-        browser = Browser(f"http://127.0.0.1:{port}")
+        browser = Browser(f"http://127.0.0.1:{port}", f"http://127.0.0.1:{native_port}" if args.direct_native else None)
+        report["commandTransport"] = "native driver" if args.direct_native else "tauri-driver proxy"
         with (args.output / "driver.log").open("w") as log:
             process = subprocess.Popen([driver, "--native-driver", native, "--port", str(port), "--native-port", str(native_port)], cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -590,6 +858,7 @@ def main():
                 browser.until('document.querySelector("#session-state").dataset.state === "saved"', "empty session restored")
                 assert browser.script('return !document.querySelector("[data-editor-path]") && document.querySelector("#editor-workspace").dataset.empty === "true"')
                 report["checks"].append("normal close flushes drafts; explicitly closed tabs stay closed after restart")
+                exercise_workspace_watch(browser, workspace, report)
                 if args.rust_analyzer:
                     exercise_rust_diagnostics(browser, workspace, report, process.pid)
                 else:

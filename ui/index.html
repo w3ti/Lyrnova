@@ -267,6 +267,7 @@
             <footer class="editor-statusbar">
               <span id="draft-state"><span class="status-dot"></span> Carregando workspace</span>
               <span id="session-state" role="status"></span>
+              <span id="workspace-watch-state" role="status"></span>
               <span id="cursor-position">Ln 1, Col 1</span>
               <span>Espaços: 2</span>
               <span id="language-mode">Texto</span>
@@ -303,13 +304,35 @@
           <pre class="terminal-output task-output" id="task-output" tabindex="0" aria-label="Saída da task" hidden>Nenhuma task executada nesta sessão.
 </pre>
           <div id="problems-panel" class="problems-panel" hidden>
-            <div class="problems-toolbar"><span id="language-status" role="status">Abra um arquivo Rust para analisar.</span><button type="button" class="secondary-button" id="language-enable">Ativar análise Rust…</button><button type="button" class="toolbar-button" id="language-restart" hidden>Reiniciar análise</button></div>
-            <p class="problems-scope">Análise inicial dos arquivos Rust abertos, sem dependências externas, biblioteca padrão, build scripts ou macros de procedimento.</p>
+            <div class="problems-toolbar"><span id="language-status" role="status">Abra um arquivo Rust para analisar.</span><button type="button" class="secondary-button" id="language-enable">Ativar análise Rust…</button><button type="button" class="toolbar-button" id="language-environment" hidden>Ambiente Rust…</button><button type="button" class="toolbar-button" id="language-restart" hidden>Reiniciar análise</button></div>
+            <p class="problems-scope" id="language-scope">Análise local, sem build scripts ou macros de procedimento. Configure as ferramentas e dependências em Ambiente Rust.</p>
+            <p id="language-action-status" role="status"></p>
+            <p id="language-details" class="problems-scope" role="status" hidden></p>
             <div id="problems-list" aria-label="Diagnósticos dos arquivos abertos"></div>
           </div>
         </section>
       </section>
     </div>
+
+    <dialog id="language-environment-dialog" class="account-dialog language-environment-dialog" aria-labelledby="language-environment-title">
+      <header class="dialog-heading"><h2 id="language-environment-title">Ambiente Rust</h2></header>
+      <div class="language-environment-fields">
+        <label for="language-toolchain">Ferramentas instaladas</label>
+        <select id="language-toolchain"></select>
+        <p id="language-toolchain-detail"></p>
+        <label><input id="language-dependencies" type="checkbox" checked> Analisar dependências locais (requer Cargo.lock atualizado)</label>
+        <label><input id="language-registry" type="checkbox"> Autorizar leitura do cache de crates do Cargo</label>
+        <pre id="language-registry-paths"></pre>
+        <p>A seleção autoriza a leitura dos diretórios exibidos e o uso dessas ferramentas apenas neste projeto e nesta sessão. Credenciais e configurações pessoais do Cargo não são compartilhadas. Não haverá downloads nem execução de build scripts.</p>
+        <p id="language-environment-error" role="alert"></p>
+      </div>
+      <footer class="dialog-actions"><button type="button" class="secondary-button" id="language-environment-cancel">Cancelar</button><button type="button" class="primary-button" id="language-environment-apply">Aplicar e reiniciar</button></footer>
+    </dialog>
+    <dialog id="language-source-dialog" class="account-dialog language-source-dialog" aria-labelledby="language-source-title">
+      <header class="dialog-heading"><h2 id="language-source-title">Fonte da biblioteca</h2><button type="button" class="secondary-button" id="language-source-close">Fechar</button></header>
+      <p class="problems-scope">Somente leitura · biblioteca usada na análise Rust</p>
+      <div id="language-source-editor"></div>
+    </dialog>
 
     <dialog id="builtin-review-dialog" class="account-dialog" aria-labelledby="builtin-review-title">
       <h2 id="builtin-review-title">Ativar plugin Rust</h2>
@@ -423,5 +446,11 @@
       </form>
     </dialog>
     <div class="sr-status visually-hidden" id="sr-status" role="status" aria-live="polite"></div>
-  </body>
+  <dialog id="rust-references-dialog" class="account-dialog rust-references-dialog" aria-labelledby="rust-references-title">
+  <h2 id="rust-references-title">Referências Rust</h2>
+  <p id="rust-references-status" role="status"></p>
+  <div id="rust-references-list" class="rust-references-list"></div>
+  <button id="rust-references-close" class="primary-button" type="button">Fechar</button>
+</dialog>
+</body>
 </html>

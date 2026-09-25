@@ -17,8 +17,19 @@ diagnósticos LSP iniciais de Rust, com revisão de permissões, servidor isolad
 marcadores e painel Problemas; veja a
 [ADR-0021](../architecture/ADR-0021-rust-lsp-diagnostics.md). Passaram 186 testes
 Rust e 20 grupos nativos, incluindo rust-analyzer real e recuperação de falha.
-Definição, hover, integração de toolchains/dependências e demais recursos de
-linguagem continuam pendentes; esta etapa não conclui o plugin Rust oficial.
+A sexta entrega local adiciona definição e hover; veja a
+[ADR-0022](../architecture/ADR-0022-rust-symbol-queries.md). Integração de
+toolchains/dependências locais foi adicionada pela sétima entrega, com revisão
+de diretórios, resolução offline e fontes externas somente leitura; veja a
+[ADR-0023](../architecture/ADR-0023-rust-toolchains-and-local-dependencies.md).
+A oitava entrega adiciona autocomplete semântico, referências, renomeação de
+símbolos em rascunhos e formatação via rustfmt; veja a
+[ADR-0024](../architecture/ADR-0024-rust-editing-actions.md).
+A nona entrega acrescenta acompanhamento de alterações externas no workspace,
+recarga de abas limpas, preservação de conflitos e atualização automática da análise
+Rust; contrato e limites na [ADR-0025](../architecture/ADR-0025-workspace-external-changes.md).
+Downloads, build scripts/proc macros, auto-imports, code actions e depuração continuam
+pendentes; estas etapas não concluem o plugin Rust oficial.
 O restante deste documento preserva o diagnóstico anterior à implementação;
 diff multi-escopo avançado e validação global do MVP continuam pendentes.
 

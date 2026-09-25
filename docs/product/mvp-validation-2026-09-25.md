@@ -34,9 +34,53 @@ houve instalação de pacote no sistema. As medições de inicialização e RSS 
 relatório antecedem a fase LSP e não medem o consumo do servidor de linguagem.
 O CI inclui o binário fixado com checksum, mas não foi executado remotamente.
 
+Atualização definição/hover: 192 testes Rust e seis testes dos providers
+JavaScript aprovados; fmt/clippy e build aprovados. Os 21 grupos nativos passaram
+com navegação F12 para arquivo ainda não aberto, cursor no símbolo, hover pelo
+Monaco e documentação sem links/imagens ativos. Evidência local em
+`target/e2e-symbols/report.json`; permanece o limite de entrada por handlers DOM.
+
+O [CI de `7f3413a`](https://github.com/w3ti/Lyrnova/actions/runs/36166921364) passou
+nas etapas Rust/frontend e falhou esperando diagnósticos na jornada nativa. O
+workflow instala Rust via rustup no HOME, que não é visível no sandbox. A correção
+local adiciona Cargo/rustc da distribuição no CI e um erro explícito na aplicação
+quando essas ferramentas faltam. A confirmação remota depende de nova execução.
+
+Atualização ambientes Rust: 196 testes Rust (184 + 12), um opcional ignorado,
+dez testes JavaScript e 23 grupos nativos aprovados. A jornada usa cópias reais
+Cargo/rustc em uma instalação temporária, cache de crate isolado e rust-src 1.97.0
+com checksum oficial verificado. Cobertura: cancelar/aplicar revisão, seleção da
+toolchain, definição/hover de dependência, visualizador somente leitura, resolução
+de Option da biblioteca padrão e preservação do lockfile. Evidência:
+`target/e2e-environment/report.json`. A amostra de memória antecede essa fase;
+não mede o consumo do servidor com stdlib. Toolchains arbitrárias e projetos com
+build scripts/proc macros ainda não estão homologados. CI atualizado, sem execução
+remota destas alterações.
+
 **Decisão:** gate automatizado local aprovado para o escopo abaixo. A homologação
 integral do MVP (#17) continua pendente de entrada/diálogos nativos, execução do
 CI e matriz de ambientes. Nenhuma issue foi fechada e nenhuma release publicada.
+
+Atualização ações Rust: 201 testes Rust (189 + 12), um opcional ignorado,
+20 testes JavaScript e 27 grupos nativos aprovados. Ctrl+Espaço aceita completion
+semântico; Shift+F12 navega referências; F2 altera chamada e definição em arquivo
+antes fechado; Shift+Alt+F aplica rustfmt. A suíte confirma rascunhos sem gravação
+em disco e desfazer por arquivo. Testes unitários cobrem cancelamento, preparação
+integral, conflitos, ranges UTF-16, operações externas e resposta obsoleta.
+Build/fmt/clippy/sintaxe aprovados. Evidência: `target/e2e-rust-actions/report.json`.
+A jornada continua usando handlers DOM no WebView nativo, sem homologação de entrada
+do SO. CI remoto das mudanças locais continua pendente.
+
+Atualização mudanças externas: 206 testes Rust (194 + 12), um opcional ignorado,
+32 testes JavaScript e 30 grupos nativos aprovados; build/fmt/clippy/sintaxe aprovados.
+O gate usa alterações reais em disco: criação, rename, remoção, recarga de abas
+limpas ativas/inativas, conflito antes de salvar, preservação de rascunhos, binário,
+recriação e save próprio. Alterar uma fonte Rust fechada reinicia a análise,
+atualiza hover/definição e preserva o rascunho do chamador. Evidência local:
+`target/e2e-watch/report.json`. Após perdas de conexão no proxy local, a execução
+completa passou com `--direct-native`; sessões seguem criadas pelo tauri-driver e
+os comandos chegam ao mesmo WebView real. O relatório identifica esse transporte.
+CI remoto e homologação de entrada do SO permanecem pendentes.
 
 ## Ambiente e resultado
 

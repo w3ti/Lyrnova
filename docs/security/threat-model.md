@@ -264,3 +264,57 @@ limpam os diagnósticos e permitem reinício, mantendo o editor utilizável.
 
 Escopo, limites e bibliotecas não carregadas estão na
 [ADR-0021](../architecture/ADR-0021-rust-lsp-diagnostics.md).
+
+### Consultas Rust de leitura
+
+Definição e hover usam IPC tipado, sessão/versão/posição e autorização antes e
+depois de esperar pelo servidor. Até oito consultas ficam pendentes por sessão;
+o prazo é de cinco segundos e respostas obsoletas são descartadas. O worker
+sincroniza os documentos antes de emitir a consulta. URIs de definição precisam
+pertencer ao workspace e ranges devem caber no texto local. Leituras de validação
+em arquivos não abertos percorrem descritores de diretórios com O_NOFOLLOW e
+aceitam somente arquivos regulares limitados. Hover é texto inerte, inclusive
+quando recebido como Markdown/HTML. O fluxo de abertura de abas mantém os riscos
+residuais de alterações externas da fronteira de workspace existente; resultados
+LSP não constituem snapshots do disco. Contrato na ADR-0022.
+
+### Toolchains e fontes externas de Rust
+
+A ADR-0023 permite escolher uma instalação existente e compartilhar somente os
+subdiretórios registry/index, registry/cache e registry/src revisados, com opt-in
+separado para cache. Tokens de revisão são vinculados ao workspace, de uso único
+e expiram em dez minutos; não são aceitos paths arbitrários do frontend. O serviço
+revalida a disponibilidade da seleção, limpa a autorização ao trocar projeto ou
+revogar Rust e não monta HOME/configuração/credenciais do Cargo. Conteúdo de crates
+privadas presentes nos diretórios concedidos também é legível pelo servidor.
+Cargo opera offline/locked, com cache/workspace somente leitura. Fontes externas
+só chegam ao visualizador após validação de URI, raiz concedida, arquivo regular,
+limites e ranges. Não há comando de edição ou leitura externa genérica. Diretórios
+autorizados permanecem mutáveis por processos do host; não há identidade por hash
+de toolchain ou snapshot de cache, e a seleção pressupõe confiança na instalação.
+
+### Ações de edição Rust
+
+Completion/references/rename/formatting reutilizam a sessão LSP autorizada e suas
+proteções de versão/cancelamento. Não existe passagem livre de métodos ou comandos.
+Comandos de completion e operações de arquivos em WorkspaceEdit são recusados;
+edições precisam de ranges UTF-16 válidos e sem sobreposição. Bibliotecas são
+somente leitura. Rename captura fontes fechadas antes da consulta e compara textos;
+o frontend prepara todos os arquivos antes de aplicar edições versionadas em memória.
+Falhas de leitura, rascunhos divergentes ou recuperação pendente rejeitam o conjunto.
+Rascunhos de abas inativas participam do backup. A gravação segue o CAS do editor.
+Rustfmt vem da toolchain selecionada via RUSTFMT e herda o isolamento do servidor.
+Os limites e a ausência de watcher de disco estão na ADR-0024.
+
+### Atualizações externas do workspace
+
+A observação periódica é limitada ao projeto ativo, roda no pool bloqueante e
+não mantém threads/descriptors entre consultas. Travessia por diretórios fixados
+em descritores impede redirecionamento por symlinks. Leitura automática usa raiz
+validada, O_NOFOLLOW por componente, arquivo regular, O_NONBLOCK e limite de bytes.
+Tokens de polling não concedem acesso a outros projetos. Respostas antigas não
+atingem novas abas/workspaces; saves em andamento são adiados. Conteúdo alterado,
+excluído, binário ou indisponível nunca substitui um rascunho divergente. Detectar
+mudanças Rust invalida consultas antigas no backend antes de reiniciar a análise.
+A observação tem limites e latência explícitos (ADR-0025); não substitui o CAS do
+salvamento nem observa diretórios externos do cache/toolchain.

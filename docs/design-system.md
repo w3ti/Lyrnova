@@ -90,3 +90,26 @@ A barra do editor diferencia salvamento do arquivo e backup da sessão. Rascunho
 recuperados com divergência no disco mostram um aviso junto ao documento, com ações
 para salvar uma cópia ou descartar explicitamente e reler. A recuperação preserva
 ordem das abas, arquivo ativo, cursor e rolagem; não reexecuta comandos do terminal.
+
+Com a análise Rust ativada, F12 abre a definição em uma aba do projeto. Hover
+mostra tipos/documentação como texto inerte e também pode ser aberto por
+Ctrl+K, Ctrl+I. Diagnósticos aparecem como marcadores no Monaco e itens navegáveis
+no painel Problemas; editar remove os resultados obsoletos imediatamente.
+
+**Ambiente Rust** revisa a toolchain, a disponibilidade de rust-src e os diretórios
+do registry; a opção de compartilhar cache começa desmarcada. O painel apresenta
+as limitações efetivas e mensagens do servidor. Definições externas abrem em um
+visualizador somente leitura, separado das abas e rascunhos do projeto.
+
+Ações Rust usam atalhos familiares: Ctrl+Espaço para sugestões, Shift+F12 para
+referências, F2 para renomear e Shift+Alt+F para formatar. Referências aparecem em
+um diálogo com botões nomeados por arquivo/linha/coluna, status anunciado e navegação
+por teclado. Renomear abre arquivos afetados em abas e marca os rascunhos; desfazer
+é por arquivo e salvar permanece explícito. Formatação usa o formatter da toolchain.
+
+A barra do editor informa se a atualização automática de arquivos está ativa ou
+indisponível. Mudanças externas recarregam abas limpas e atualizam Explorer/busca.
+Rascunhos, exclusões e substituições incompatíveis usam o aviso de conflito já
+existente, com salvar cópia ou reler explicitamente. Atualizações repetidas não
+apagam mensagens de falha ao salvar. A análise Rust mostra novamente seu estado
+de inicialização ao recarregar fontes externas ao editor.

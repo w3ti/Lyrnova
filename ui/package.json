@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "check": "node --check app.js && node --check terminal.js && node --check language.js"
+    "check": "node --check app.js && node --check terminal.js && node --check language.js && node --check language-actions.js && node --check language-edits.js && node --check workspace-watch.js && node --check rust-environment.js",
+    "test": "node tests/workspace-watch.test.js && node tests/language.test.js && node tests/language-actions.test.js && node tests/language-edits.test.js && node tests/rust-environment.test.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod tasks;
 pub mod terminal;
 pub mod workspace;
+pub mod workspace_watch;
 
 use std::sync::{
     Arc, Mutex, RwLock,
@@ -25,7 +26,9 @@ use std::{fs, process::Command};
 
 use ai_provider::{current_ai_provider, resolve_ai_provider};
 use git::{GitCommitReview, GitDiff, GitDiffScope, GitError, GitService, GitStatusSummary};
-use language::{LanguageDocument, LanguageError, LanguageService, LanguageSnapshot};
+use language::{
+    LanguageDocument, LanguageError, LanguageQuery, LanguageService, LanguageSnapshot, QueryResult,
+};
 use plugin_catalog::{
     PluginCatalogError, PluginCatalogService, TrustedPluginSummary, download_release,
 };
@@ -440,6 +443,56 @@ fn workspace_list(
         .list()
 }
 
+#[tauri::command]
+async fn workspace_poll(
+    app: tauri::AppHandle,
+    workspace: String,
+    token: Option<String>,
+    paths: Vec<String>,
+) -> Result<workspace_watch::WatchSnapshot, workspace_watch::WatchError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use workspace_watch::WatchError;
+        let state = app.state::<ProjectState>();
+        let project = state.0.read().map_err(|_| WatchError::Unavailable)?;
+        let project = project.as_ref().ok_or(WatchError::WorkspaceChanged)?;
+        if project.workspace.root().to_str() != Some(&workspace) {
+            return Err(WatchError::WorkspaceChanged);
+        }
+        let snapshot = app.state::<workspace_watch::WorkspaceWatchService>().poll(
+            project.workspace.root(),
+            token.as_deref(),
+            &paths,
+        )?;
+        if snapshot.rust_changed {
+            app.state::<LanguageService>()
+                .invalidate_disk(project.workspace.root())
+                .map_err(|_| WatchError::Unavailable)?;
+        }
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|_| workspace_watch::WatchError::Unavailable)?
+}
+
+#[tauri::command]
+async fn workspace_read_current(
+    app: tauri::AppHandle,
+    workspace: String,
+    path: String,
+) -> Result<DocumentSnapshot, WorkspaceError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        let project = state.0.read().map_err(|_| WorkspaceError::Io)?;
+        let project = project.as_ref().ok_or(WorkspaceError::NoWorkspace)?;
+        if project.workspace.root().to_str() != Some(&workspace) {
+            return Err(WorkspaceError::NoWorkspace);
+        }
+        project.workspace.read(&path)
+    })
+    .await
+    .map_err(|_| WorkspaceError::Io)?
+}
+
 fn editor_session_store(
     app: &tauri::AppHandle,
 ) -> Result<editor_session::SessionStore, editor_session::SessionError> {
@@ -497,6 +550,67 @@ async fn editor_session_save(
     })
     .await
     .map_err(|_| editor_session::SessionError::Unavailable)?
+}
+
+#[tauri::command]
+async fn language_environment_review(
+    app: tauri::AppHandle,
+    workspace: String,
+) -> Result<language::EnvironmentReview, LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        if project.workspace.root().to_string_lossy() != workspace {
+            return Err(LanguageError::WorkspaceChanged);
+        }
+        app.state::<LanguageService>()
+            .review_environment(project.workspace.root())
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
+}
+
+#[tauri::command]
+async fn language_environment_configure(
+    app: tauri::AppHandle,
+    workspace: String,
+    choice: language::EnvironmentChoice,
+) -> Result<language::EnvironmentSummary, LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        if project.workspace.root().to_string_lossy() != workspace {
+            return Err(LanguageError::WorkspaceChanged);
+        }
+        app.state::<LanguageService>()
+            .configure_environment(project.workspace.root(), choice)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
 }
 
 #[tauri::command]
@@ -580,6 +694,88 @@ async fn language_status(
         let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
         app.state::<LanguageService>()
             .snapshot(project.workspace.root(), &session_id)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
+}
+
+#[tauri::command]
+async fn language_query(
+    app: tauri::AppHandle,
+    session_id: String,
+    query: LanguageQuery,
+) -> Result<QueryResult, LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let service = app.state::<LanguageService>();
+        let (root, ticket) = {
+            let _mutation = plugins
+                .mutation
+                .lock()
+                .map_err(|_| LanguageError::StateUnavailable)?;
+            app.state::<PluginRegistry>()
+                .authorize_rust_diagnostics()
+                .map_err(|_| LanguageError::PermissionDenied)?;
+            let project = app.state::<ProjectState>();
+            let project = project
+                .0
+                .read()
+                .map_err(|_| LanguageError::StateUnavailable)?;
+            let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+            let root = project.workspace.root().to_path_buf();
+            let ticket = service.query(&root, &session_id, query)?;
+            (root, ticket)
+        };
+        // Never hold workspace/plugin lifecycle locks while waiting for the server.
+        let value = ticket.wait()?;
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        if project.workspace.root() != root {
+            return Err(LanguageError::WorkspaceChanged);
+        }
+        service.finish_query(&root, &session_id, &ticket, value)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
+}
+
+#[tauri::command]
+async fn language_cancel(
+    app: tauri::AppHandle,
+    session_id: String,
+    request_id: String,
+) -> Result<(), LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        app.state::<LanguageService>().cancel_query(
+            project.workspace.root(),
+            &session_id,
+            &request_id,
+        )
     })
     .await
     .map_err(|_| LanguageError::StateUnavailable)?
@@ -1577,6 +1773,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ProjectState(RwLock::new(None)))
+        .manage(workspace_watch::WorkspaceWatchService::default())
         .manage(LoginState(Arc::new(AtomicBool::new(false))))
         .manage(ApprovalBroker::default())
         .manage(PluginRegistry::with_catalog_service(
@@ -1628,10 +1825,16 @@ pub fn run() {
             project_open_dialog,
             project_create_dialog,
             workspace_list,
+            workspace_poll,
+            workspace_read_current,
             workspace_read,
             language_start,
+            language_environment_review,
+            language_environment_configure,
             language_sync,
             language_status,
+            language_query,
+            language_cancel,
             editor_session_load,
             editor_session_save,
             workspace_read_range,

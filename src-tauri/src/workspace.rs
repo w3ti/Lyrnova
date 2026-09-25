@@ -411,8 +411,19 @@ impl WorkspaceService {
     }
 
     pub fn read(&self, relative: &str) -> Result<DocumentSnapshot, WorkspaceError> {
-        let path = self.existing_file(relative)?;
-        let bytes = fs::read(&path).map_err(|_| WorkspaceError::Io)?;
+        self.existing_file(relative)?;
+        let file = open_document(&self.root, relative)?;
+        let metadata = file.metadata().map_err(|_| WorkspaceError::Io)?;
+        if !metadata.is_file() {
+            return Err(WorkspaceError::NotAFile);
+        }
+        if metadata.len() > MAX_DOCUMENT_BYTES as u64 {
+            return Err(WorkspaceError::DocumentTooLarge);
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_DOCUMENT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| WorkspaceError::Io)?;
         if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(WorkspaceError::DocumentTooLarge);
         }
@@ -877,6 +888,45 @@ fn is_portable_path_component(component: &str) -> bool {
             .is_some_and(|suffix| {
                 matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
             })
+}
+
+fn open_document(root: &Path, relative: &str) -> Result<fs::File, WorkspaceError> {
+    let relative = validate_relative(relative)?;
+    #[cfg(unix)]
+    {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        };
+        let mut parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+            .map_err(|_| WorkspaceError::Io)?;
+        let mut parts = relative.components().peekable();
+        while let Some(part) = parts.next() {
+            let name = std::ffi::CString::new(part.as_os_str().as_bytes())
+                .map_err(|_| WorkspaceError::InvalidPath)?;
+            let flags = libc::O_RDONLY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | if parts.peek().is_some() {
+                    libc::O_DIRECTORY
+                } else {
+                    libc::O_NONBLOCK
+                };
+            // SAFETY: owned parent descriptor and component remain alive across openat.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(WorkspaceError::Io);
+            }
+            // SAFETY: successful openat returns a fresh owned descriptor.
+            parent = unsafe { fs::File::from_raw_fd(fd) };
+        }
+        Ok(parent)
+    }
+    #[cfg(not(unix))]
+    fs::File::open(root.join(relative)).map_err(|_| WorkspaceError::Io)
 }
 
 fn read_searchable_text(path: &Path) -> Result<Option<String>, WorkspaceError> {

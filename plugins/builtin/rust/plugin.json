@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.w3ti.lyrnova.language.rust",
   "name": "Rust",
-  "description": "Suporte a Rust com diagnósticos locais do rust-analyzer em arquivos abertos.",
+  "description": "Rust local: diagnósticos, autocomplete, definição, hover, referências, renomeação e formatação.",
   "version": "0.1.1",
   "publisher": "w3ti",
   "license": "GPL-3.0-only",

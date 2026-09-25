@@ -1,3 +1,5 @@
+import { createWorkspaceMonitor, reconcileDocument } from "./workspace-watch.js";
+import { prepareRenameDrafts } from "./language-edits.js";
 import * as monaco from "monaco-editor";
 import { createTerminalView } from "./terminal.js";
 import { createRustDiagnostics } from "./language.js";
@@ -279,6 +281,10 @@ const openDocuments = invoke ? [] : ["src-tauri/src/backend.rs"];
 let activeDocument = openDocuments[0] ?? null;
 const documentViews = new Map();
 const recoveryConflicts = new Set();
+const savingDocuments = new Set();
+let workspaceMonitor = null;
+let workspaceContext = null;
+let workspaceTreeSequence = 0;
 let editorSession = null;
 let sessionTimer = null;
 let sessionTransition = false;
@@ -1046,13 +1052,6 @@ function initializeCodeEditor() {
     wordBasedSuggestions: "matchingDocuments",
   });
 
-  codeEditor.onDidChangeModelContent(() => {
-    if (!activeDocument || !codeEditor.getModel()) return;
-    draftDocuments.set(activeDocument, codeEditor.getValue());
-    updateDraftState();
-    scheduleEditorSession();
-    diagnosticsView?.changed();
-  });
   codeEditor.onDidChangeModel(updateEditorEmptyState);
   codeEditor.onDidChangeCursorPosition(() => { updateCursorPosition(); scheduleEditorSession(); });
   codeEditor.onDidScrollChange(scheduleEditorSession);
@@ -1060,6 +1059,8 @@ function initializeCodeEditor() {
   codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
     if (activeDocument) void closeDocument(activeDocument);
   });
+  codeEditor.addAction({ id: "lyrnova.rust.references", label: "Encontrar referências Rust", precondition: "editorLangId == rust", keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F12], contextMenuGroupId: "navigation", run: editor => diagnosticsView.references(editor) });
+  codeEditor.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () => codeEditor.getAction("editor.action.formatDocument")?.run());
   applyIdeSettings(false);
   updateEditorEmptyState();
 }
@@ -2063,7 +2064,7 @@ async function restoreEditorSession() {
     context.ready = true;
     if (recovered || unavailable) announce(`${recovered} rascunho(s) recuperado(s). ${unavailable} arquivo(s) indisponível(is).`);
     await flushEditorSession();
-  } finally { editorRestoring = false; }
+  } finally { editorRestoring = false; workspaceContext = currentProject ? { workspace: currentProject.path, generation: editorGeneration } : null; workspaceMonitor?.start(); }
 }
 
 async function reloadRecoveredDocument() {
@@ -2363,6 +2364,27 @@ function showWorkspaceView(view, focusEditor = false) {
   announce("Editor central focado");
 }
 
+function ensureDocumentModel(path) {
+  let model = editorModels.get(path);
+  if (!model) {
+    model = monaco.editor.createModel(draftDocuments.get(path), languageIdFor(path), monaco.Uri.from({ scheme: "file", path: `/workspace/${path}` }));
+    editorModels.set(path, model);
+    model.onDidChangeContent(() => {
+      draftDocuments.set(path, model.getValue());
+      updateDraftState(); scheduleEditorSession(); diagnosticsView?.changed();
+    });
+  }
+  return model;
+}
+
+function prepareRustRename(documents, isCurrent) {
+  return prepareRenameDrafts(documents, isCurrent, {
+    getGeneration: () => editorGeneration, isBlocked: () => sessionTransition || editorRestoring,
+    read: path => invoke("workspace_read", { path }), draftDocuments, savedDocuments, documentRevisions, recoveryConflicts, openDocuments, ensureDocumentModel,
+    onPrepared: () => { updateDraftState(); scheduleEditorSession(); },
+  });
+}
+
 async function openDocument(path, focusEditor = true, targetLine = null, restoring = false) {
   if (sessionTransition || (editorRestoring && !restoring)) return;
   const generation = editorGeneration;
@@ -2384,12 +2406,7 @@ async function openDocument(path, focusEditor = true, targetLine = null, restori
   captureDocumentView();
   if (!openDocuments.includes(path)) openDocuments.push(path);
   activeDocument = path;
-  let model = editorModels.get(path);
-  if (!model) {
-    const uri = monaco.Uri.from({ scheme: "file", path: `/workspace/${path}` });
-    model = monaco.editor.createModel(draftDocuments.get(path), languageIdFor(path), uri);
-    editorModels.set(path, model);
-  }
+  const model = ensureDocumentModel(path);
   codeEditor.setModel(model);
   const view = documentViews.get(path);
   if (view) {
@@ -2419,6 +2436,7 @@ async function saveDocument() {
   const submittedContent = codeEditor.getValue();
   draftDocuments.set(path, submittedContent);
   const expectedRevision = documentRevisions.get(path);
+  if (savingDocuments.has(path)) return;
   if (invoke && (!expectedRevision || recoveryConflicts.has(path))) {
     setEditorError("Rascunho preservado: salve uma cópia ou releia o arquivo do disco");
     return;
@@ -2430,6 +2448,7 @@ async function saveDocument() {
     return;
   }
 
+  savingDocuments.add(path);
   try {
     const snapshot = await invoke("workspace_save", {
       request: {
@@ -2447,6 +2466,7 @@ async function saveDocument() {
     void loadGitStatus();
     announce(`${documentName(path)} salvo no disco`);
   } catch (error) {
+    if (generation !== editorGeneration) return;
     if (error?.code === "conflict") {
       recoveryConflicts.add(path);
       updateDraftState();
@@ -2455,7 +2475,7 @@ async function saveDocument() {
     } else {
       setEditorError("Falha ao salvar; seu rascunho foi preservado");
     }
-  }
+  } finally { savingDocuments.delete(path); workspaceMonitor?.wake(); }
 }
 
 function renderWorkspaceTree() {
@@ -2574,8 +2594,11 @@ function scheduleWorkspaceSearch() {
 
 async function loadWorkspaceTree(resetCollapse = true) {
   if (!invoke) return;
+  const generation = editorGeneration, sequence = ++workspaceTreeSequence;
   try {
-    workspaceEntries = await invoke("workspace_list");
+    const entries = await invoke("workspace_list");
+    if (generation !== editorGeneration || sequence !== workspaceTreeSequence) return;
+    workspaceEntries = entries;
     if (resetCollapse) {
       collapsedDirectories.clear();
       workspaceEntries
@@ -2589,6 +2612,7 @@ async function loadWorkspaceTree(resetCollapse = true) {
     if (fileFilter.value.trim()) await searchWorkspace();
     else renderWorkspaceTree();
   } catch {
+    if (generation !== editorGeneration || sequence !== workspaceTreeSequence) return;
     workspaceEntries = [];
     renderWorkspaceTree();
   }
@@ -2729,6 +2753,7 @@ async function restoreWorkspaceEntry() {
 
 function renderProjectSummary(project) {
   currentProject = project;
+  workspaceContext = { workspace: project.path, generation: editorGeneration };
   projectName.textContent = project.name;
   contextProjectName.textContent = project.name;
   contextProjectPath.textContent = project.path;
@@ -2765,6 +2790,9 @@ function renderNoProject() {
 }
 
 function clearEditorWorkspace() {
+  workspaceMonitor?.stop();
+  workspaceContext = null;
+  ++workspaceTreeSequence;
   diagnosticsView?.reset();
   ++editorGeneration;
   clearTimeout(sessionTimer);
@@ -3534,13 +3562,46 @@ systemDarkTheme.addEventListener("change", () => {
   if (ideSettings.appTheme === "system") applyIdeSettings(false);
 });
 
+workspaceMonitor = createWorkspaceMonitor({
+  invoke, context: () => workspaceContext, ready: () => Boolean(currentProject && workspaceContext) && !sessionTransition && !editorRestoring,
+  paths: () => [...openDocuments],
+  status: (text, state) => { const node = document.querySelector("#workspace-watch-state"); if (node.textContent !== text) node.textContent = text; node.dataset.state = state; node.title = text; },
+  refresh: () => Promise.all([loadWorkspaceTree(false), loadGitStatus()]),
+  invalidateRust: () => diagnosticsView?.workspaceChanged(),
+  reconcile: (path, current, workspace) => reconcileDocument(path, current, {
+    read: path => invoke("workspace_read_current", { workspace, path }),
+    exists: path => openDocuments.includes(path), busy: path => savingDocuments.has(path),
+    revision: path => documentRevisions.get(path), identity: path => editorModels.get(path),
+    draft: path => draftDocuments.get(path), dirty: isDirty,
+    accept: (path, snapshot, replace) => {
+      if (!replace && snapshot.revision === documentRevisions.get(path) && snapshot.content === savedDocuments.get(path) && !recoveryConflicts.has(path)) return;
+      savedDocuments.set(path, snapshot.content); documentRevisions.set(path, snapshot.revision); recoveryConflicts.delete(path);
+      if (replace) {
+        draftDocuments.set(path, snapshot.content);
+        const model = editorModels.get(path);
+        const view = activeDocument === path ? codeEditor.saveViewState() : null;
+        model?.setValue(snapshot.content);
+        if (view) codeEditor.restoreViewState(view);
+      }
+      updateDraftState(); scheduleEditorSession(); diagnosticsView?.changed();
+    },
+    conflict: path => {
+      if (recoveryConflicts.has(path)) return;
+      announce(`${documentName(path)} mudou no disco. Seu rascunho foi preservado.`);
+      recoveryConflicts.add(path); updateDraftState(); scheduleEditorSession();
+    },
+  }),
+});
+
 diagnosticsView = createRustDiagnostics({
   invoke, monaco, getWorkspace: () => currentProject?.path,
   getDocuments: () => openDocuments.map(path => ({ path, text: draftDocuments.get(path) ?? "" })),
   modelFor: path => editorModels.get(path),
+  prepareRename: prepareRustRename,
   navigate: async (path, position) => {
+    const generation = editorGeneration;
     await openDocument(path, true, position.line + 1);
-    if (activeDocument === path) { codeEditor.setPosition({ lineNumber: position.line + 1, column: position.character + 1 }); codeEditor.revealPositionInCenter(codeEditor.getPosition()); }
+    if (generation === editorGeneration && activeDocument === path) { codeEditor.setPosition({ lineNumber: position.line + 1, column: position.character + 1 }); codeEditor.revealPositionInCenter(codeEditor.getPosition()); }
   },
   review: openRustPermissionReview,
 });
@@ -3649,6 +3710,6 @@ async function initializeWorkspace() {
 
 diffScope.addEventListener("change", renderGitDiffFiles);
 gitReviewDialog.addEventListener("cancel", (event) => { event.preventDefault(); cancelGitReview(); });
-window.addEventListener("focus", () => { if (currentProject) void loadGitStatus(); });
+window.addEventListener("focus", () => { workspaceMonitor?.wake(); if (currentProject) void loadGitStatus(); });
 
 void initializeWorkspace();

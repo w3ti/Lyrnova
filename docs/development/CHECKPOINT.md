@@ -84,8 +84,75 @@ Evidência local: `target/e2e-lsp/report.json`. CI remoto e homologação manual
 continuam pendentes. Os ícones da barra esquerda passam a 24 px no tamanho
 padrão da interface, com botões de 48 px (42 px na densidade compacta).
 
-O próximo trabalho funcional é ampliar a ponte Rust com navegação para definição
-e hover, além de tratar a integração das toolchains e dependências explicitamente.
+As cinco entregas acima foram publicadas em `7f3413a` em `main`. O CI remoto
+passou nas verificações de Rust/frontend e falhou na espera dos diagnósticos
+nativos. O runner usava rustup no HOME, fora do sandbox de análise. O ajuste local
+instala Cargo/rustc da distribuição no CI e informa a ausência dessas ferramentas
+na UI; a confirmação remota desse ajuste ainda depende de nova execução.
+
+Sexta entrega local: definição (F12) e hover Rust, com abertura de outra aba,
+consultas limitadas/canceláveis, descarte de resultados obsoletos e documentação
+inerte. Contrato e limites na [ADR-0022](../architecture/ADR-0022-rust-symbol-queries.md).
+Validação da sexta entrega: 192 testes Rust aprovados (180 unitários + 12 de
+fronteira), um opcional de provider ignorado, seis testes de providers JavaScript,
+fmt/clippy e build aprovados. Os 21 grupos da jornada nativa passaram, incluindo
+hover literal e F12 abrindo uma definição em outra aba com rust-analyzer real.
+Evidência local: `target/e2e-symbols/report.json`. Entrada continua via handlers
+DOM; teclado/mouse do SO e acessibilidade não foram homologados por esta suíte.
+Sétima entrega local: seleção explícita de toolchains instaladas (sistema/rustup),
+fontes da biblioteca padrão e resolução offline de dependências. A revisão mostra
+os diretórios e exige opção explícita para compartilhar registry; configuração e
+credenciais pessoais ficam fora do sandbox. A autorização é por workspace/sessão,
+com token limitado, revalidação e revogação no lifecycle. F12 externo abre um
+visualizador somente leitura; erros de metadados aparecem no painel. A resolução
+continua sem build scripts, proc macros, downloads ou alterações em Cargo.lock.
+Contrato na [ADR-0023](../architecture/ADR-0023-rust-toolchains-and-local-dependencies.md).
+
+Validação da sétima entrega: 196 testes Rust (184 unitários + 12 de fronteira),
+um opcional ignorado, dez testes JavaScript e 23 grupos nativos aprovados, incluindo
+crate em cache, toolchain instalada e definição de Option na biblioteca padrão.
+Relatório local: `target/e2e-environment/report.json`. As fontes Rust 1.97.0 usadas
+no teste foram obtidas e verificadas em diretório temporário, sem instalar pacotes
+no host. O CI foi ampliado com rust-src, mas não houve nova execução remota.
+Oitava entrega local: os quatro recursos de edição Rust foram implementados.
+Autocomplete semântico (Ctrl+Espaço), referências navegáveis (Shift+F12), renomeação
+entre arquivos (F2) e formatação (Shift+Alt+F). Rename abre arquivos fechados como
+rascunhos versionados, preserva conteúdo não salvo e conflitos, participa do backup
+e permite desfazer por arquivo. Rustfmt usa a toolchain selecionada no sandbox.
+Não há salvamento automático, auto-import nem operações de arquivos pelo LSP.
+Contrato e limites na [ADR-0024](../architecture/ADR-0024-rust-editing-actions.md).
+
+Validação da oitava entrega: 201 testes Rust (189 unitários + 12 de fronteira),
+um opcional ignorado, 20 testes JavaScript e 27 grupos nativos aprovados. Os quatro
+recursos foram exercitados com servidor/ferramenta reais e atalhos no Monaco,
+incluindo aceitação de completion, referências, arquivo fechado na renomeação,
+ausência de escrita no disco e desfazer. Build, fmt, clippy e sintaxe aprovados.
+Relatório: `target/e2e-rust-actions/report.json`. A confirmação de sincronização
+usa versões dos documentos independentemente da publicação de diagnósticos.
+O atalho Shift+Alt+F foi explicitamente associado à formatação no Linux.
+Alterações das entregas seis a oito permanecem locais, sem novo commit/push;
+o gate remoto ainda precisa de nova execução após publicação autorizada.
+Nona entrega local: detecção de alterações externas no workspace, com polling
+limitado a cada 1,5 segundo, hashes de abas/fontes Rust e leituras sem seguir
+symlinks. Abas limpas recarregam; rascunhos, arquivos removidos/binários e conflitos
+são preservados. Explorer/busca atualizam sem perder pastas recolhidas. Salvamento,
+leitura e troca de projeto têm proteção contra respostas obsoletas. Mudanças Rust
+invalidam consultas no backend e reiniciam a análise com rascunhos e ambiente
+preservados. Contrato/limites na [ADR-0025](../architecture/ADR-0025-workspace-external-changes.md).
+
+Validação: 206 testes Rust (194 unitários + 12 de fronteira), um opcional ignorado,
+32 testes JavaScript e 30 grupos nativos aprovados. Build, fmt, clippy e sintaxe
+aprovados. O gate verificou alterações reais no disco, abas ativas/inativas,
+conflito antes de salvar, reload explícito, recriação, substituição binária, save
+próprio sem conflito e hover/definição após alterar uma fonte Rust fechada.
+Evidência: `target/e2e-watch/report.json`. O proxy local tauri-driver encerrou
+conexões em tentativas anteriores; o gate completo passou com `--direct-native`,
+registrado no relatório, mantendo binário/WebView/IPC reais e criação das sessões
+pelo tauri-driver. Nenhum comando de mutação é repetido implicitamente.
+Não houve novo commit/push; o CI remoto destas alterações continua pendente.
+Próximas frentes possíveis: code actions/auto-imports e homologação manual dos
+fluxos de edição. Monitor incremental para projetos grandes e diretórios externos
+segue pendente.
 
 ## Registro histórico de 2026-09-02
 

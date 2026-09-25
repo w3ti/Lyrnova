@@ -679,3 +679,23 @@ body.resizing-panels iframe { pointer-events: none; }
 .problem-item[data-severity="2"] > span:first-child { color: var(--yellow); }
 .problem-location { color: var(--muted); flex-shrink: 0; }
 #builtin-permissions label { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
+
+.language-environment-dialog { width: min(720px, calc(100vw - 40px)); }
+.language-environment-fields { display: grid; gap: 12px; padding: 18px; color: var(--muted); }
+.language-environment-fields select { width: 100%; padding: 9px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; }
+.language-environment-fields p, .language-environment-fields pre { margin: 0; font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.language-environment-fields label { font-size: .85rem; }
+.language-environment-fields input { margin-right: 6px; }
+.language-source-dialog { width: min(1080px, calc(100vw - 40px)); }
+.language-source-dialog .dialog-heading { display: flex; align-items: center; justify-content: space-between; padding: 16px; gap: 16px; }
+.language-source-dialog h2 { font-size: 1rem; overflow-wrap: anywhere; }
+#language-source-editor { height: min(65vh, 680px); min-height: 240px; }
+#language-details { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow: auto; color: var(--yellow); }
+
+.account-dialog.rust-references-dialog { width: min(720px, 90vw); max-height: 80vh; padding: 24px; }
+.rust-references-list { display: grid; gap: 8px; max-height: 50vh; overflow: auto; margin-block: 16px; }
+.rust-reference-item { text-align: left; padding: 10px; overflow-wrap: anywhere; }
+#language-action-status:empty { display: none; }
+
+#workspace-watch-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#workspace-watch-state[data-state="error"] { color: var(--yellow); }

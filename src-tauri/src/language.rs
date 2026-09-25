@@ -1,5 +1,10 @@
-//! Narrow, versioned Rust diagnostics adapter. No generic LSP/execute-command IPC.
+//! Versioned Rust diagnostics and read-only symbol queries. No generic LSP IPC.
+mod environment;
 mod protocol;
+pub use environment::{EnvironmentChoice, EnvironmentReview, EnvironmentSummary};
+mod editing;
+mod query;
+pub use query::{LanguageQuery, QueryResult};
 #[cfg(target_os = "linux")]
 mod runtime;
 
@@ -32,6 +37,8 @@ pub enum LanguageError {
     InvalidDocument,
     TooLarge,
     ServerUnavailable,
+    ToolchainUnavailable,
+    ReviewExpired,
     SandboxUnavailable,
     SpawnFailed,
     ProtocolViolation,
@@ -39,6 +46,10 @@ pub enum LanguageError {
     ServerExited,
     StateUnavailable,
     UnsupportedPlatform,
+    UnsupportedFeature,
+    StaleDocument,
+    Cancelled,
+    Busy,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -49,7 +60,7 @@ pub struct LanguageDocument {
     pub text: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub line: u32,
     pub character: u32,
@@ -80,8 +91,14 @@ pub struct LanguageSnapshot {
     pub state: String,
     pub error: Option<LanguageError>,
     pub diagnostics: Vec<DocumentDiagnostics>,
+    pub environment: Option<EnvironmentSummary>,
+    pub analysis_message: Option<String>,
+    pub document_versions: BTreeMap<String, i32>,
 }
 struct State {
+    sources: Vec<environment::SourceRoot>,
+    configuration: Value,
+    queries: query::Queries,
     highest_version: i32,
     documents: BTreeMap<String, Arc<LanguageDocument>>,
     snapshot: LanguageSnapshot,
@@ -103,9 +120,37 @@ impl Drop for Session {
 #[derive(Default)]
 pub struct LanguageService {
     session: Mutex<Option<Session>>,
+    environments: Mutex<environment::Environments>,
 }
 impl LanguageService {
+    pub fn invalidate_disk(&self, root: &Path) -> Result<(), LanguageError> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        if let Some(current) = session.as_ref().filter(|s| s.root == root) {
+            let mut state = current
+                .state
+                .lock()
+                .map_err(|_| LanguageError::StateUnavailable)?;
+            if matches!(
+                state.snapshot.state.as_str(),
+                "running" | "starting" | "outdated"
+            ) {
+                state.snapshot.state = "outdated".into();
+                state.snapshot.diagnostics.clear();
+                state.queries.revision += 1;
+                state.queries.stop();
+            }
+        }
+        Ok(())
+    }
+
     pub fn stop(&self) -> Result<(), LanguageError> {
+        *self
+            .environments
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)? = environment::Environments::default();
         let session = self
             .session
             .lock()
@@ -130,8 +175,12 @@ impl LanguageService {
         }
         #[cfg(target_os = "linux")]
         {
-            let child = runtime::spawn(root)?;
+            let environment = self.selected_environment(root)?;
+            let child = runtime::spawn(root, &environment)?;
             let state = Arc::new(Mutex::new(State {
+                sources: environment.sources(),
+                configuration: environment.configuration(),
+                queries: query::Queries::default(),
                 highest_version: 0,
                 documents: BTreeMap::new(),
                 snapshot: LanguageSnapshot {
@@ -139,6 +188,9 @@ impl LanguageService {
                     state: "starting".into(),
                     error: None,
                     diagnostics: vec![],
+                    environment: Some(environment.summary()),
+                    analysis_message: None,
+                    document_versions: BTreeMap::new(),
                 },
             }));
             let cancel = Arc::new(AtomicBool::new(false));
@@ -202,6 +254,9 @@ impl LanguageService {
                 .get(&d.path)
                 .is_some_and(|doc| doc.version == d.version)
         });
+        if state.documents != documents {
+            state.queries.revision += 1;
+        }
         state.documents = documents;
         Ok(())
     }
@@ -228,12 +283,17 @@ fn matching<'a>(
     Ok(current)
 }
 fn snapshot(session: &Session) -> Result<LanguageSnapshot, LanguageError> {
-    Ok(session
+    let state = session
         .state
         .lock()
-        .map_err(|_| LanguageError::StateUnavailable)?
-        .snapshot
-        .clone())
+        .map_err(|_| LanguageError::StateUnavailable)?;
+    let mut snapshot = state.snapshot.clone();
+    snapshot.document_versions = state
+        .documents
+        .iter()
+        .map(|(path, doc)| (path.clone(), doc.version))
+        .collect();
+    Ok(snapshot)
 }
 fn validate_documents(
     root: &Path,
@@ -249,28 +309,10 @@ fn validate_documents(
         if doc.text.len() > MAX_DOCUMENT {
             return Err(LanguageError::TooLarge);
         }
-        if doc.version <= 0
-            || !doc.path.ends_with(".rs")
-            || doc.path.len() > 4096
-            || doc.path.contains(['\0', '\\'])
-            || doc
-                .path
-                .split('/')
-                .any(|p| p.is_empty() || p == "." || p == ".." || p == ".git")
-        {
+        if doc.version <= 0 {
             return Err(LanguageError::InvalidDocument);
         }
-        let mut path = root.to_path_buf();
-        for part in doc.path.split('/') {
-            path.push(part);
-            match std::fs::symlink_metadata(&path) {
-                Ok(m) if m.file_type().is_symlink() => return Err(LanguageError::InvalidDocument),
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(LanguageError::InvalidDocument);
-                }
-                _ => {}
-            }
-        }
+        query::checked_path(root, &doc.path)?;
         if result.insert(doc.path.clone(), Arc::new(doc)).is_some() {
             return Err(LanguageError::InvalidDocument);
         }
@@ -285,6 +327,7 @@ fn uri(path: &str) -> String {
 fn configuration() -> Value {
     json!({
         "cargo": {"buildScripts": {"enable": false, "rebuildOnSave": false}, "autoreload": false, "noDeps": true, "sysroot": null},
+        "completion": {"autoimport": {"enable": false}},
         "procMacro": {"enable": false}, "checkOnSave": false,
         "cachePriming": {"enable": false}, "numThreads": 2,
         "diagnostics": {"enable": true}, "files": {"watcher": "client"}
@@ -295,8 +338,14 @@ fn initialization() -> Value {
         "processId": null, "clientInfo": {"name":"Lyrnova", "version": env!("CARGO_PKG_VERSION")},
         "rootUri":"file:///workspace", "workspaceFolders":[{"uri":"file:///workspace", "name":"workspace"}],
         "capabilities": {"general":{"positionEncodings":["utf-16"]},
+            "experimental":{"serverStatusNotification":true},
             "workspace":{"configuration":true, "applyEdit":false},
-            "textDocument":{"publishDiagnostics":{"versionSupport":true}, "synchronization":{"didSave":false, "dynamicRegistration":false}}},
+            "textDocument":{"hover":{"contentFormat":["plaintext"], "dynamicRegistration":false},
+                "definition":{"linkSupport":true, "dynamicRegistration":false},
+                "completion":{"completionItem":{"snippetSupport":true,"documentationFormat":["plaintext"]}},
+                "references":{"dynamicRegistration":false}, "rename":{"dynamicRegistration":false},
+                "formatting":{"dynamicRegistration":false},
+                "publishDiagnostics":{"versionSupport":true}, "synchronization":{"didSave":false, "dynamicRegistration":false}}},
         "initializationOptions": configuration()
     }})
 }
@@ -377,6 +426,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("lyrnova-language-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let state = Arc::new(Mutex::new(State {
+            sources: vec![],
+            configuration: configuration(),
+            queries: query::Queries::default(),
             highest_version: 0,
             documents: BTreeMap::new(),
             snapshot: LanguageSnapshot {
@@ -384,10 +436,14 @@ mod tests {
                 state: "running".into(),
                 error: None,
                 diagnostics: vec![],
+                environment: None,
+                analysis_message: None,
+                document_versions: BTreeMap::new(),
             },
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let service = LanguageService {
+            environments: Mutex::default(),
             session: Mutex::new(Some(Session {
                 root: root.clone(),
                 state,
