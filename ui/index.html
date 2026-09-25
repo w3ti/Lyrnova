@@ -56,7 +56,7 @@
         <section class="sidebar-panel git-panel" aria-label="Controle de código-fonte">
           <div class="section-heading"><span>Controle de código-fonte</span><button class="icon-button" type="button" aria-label="Mais ações Git">•••</button></div>
           <div class="git-branch"><span aria-hidden="true">⑂</span><span><strong id="git-branch-name">Git</strong><small id="git-branch-summary">Carregando status…</small></span><button type="button" data-action="refresh-git" title="Atualizar" aria-label="Atualizar status Git">↻</button></div>
-          <label class="commit-input"><textarea id="git-commit-message" rows="2" maxlength="16384" placeholder="Mensagem de commit" aria-label="Mensagem de commit"></textarea><button id="git-commit-button" type="button" data-action="git-commit" disabled>Commit</button></label>
+          <label class="commit-input"><textarea id="git-commit-message" rows="2" maxlength="16384" placeholder="Mensagem de commit" aria-label="Mensagem de commit"></textarea><button id="git-commit-button" type="button" data-action="git-commit" disabled>Revisar commit</button></label>
           <section id="git-staged-group" hidden>
             <div class="section-heading git-group"><span>Alterações preparadas</span><span id="git-staged-count">0</span></div>
             <div class="git-file-list" id="git-staged-list"></div>
@@ -120,7 +120,7 @@
             <button class="toolbar-button ai-plugin-control" type="button" data-action="show-agent-panel" hidden><span aria-hidden="true">◇</span> Chat</button>
             <button class="toolbar-button" type="button" data-action="focus-editor"><span aria-hidden="true">{ }</span> Editor</button>
             <button class="toolbar-button" type="button" data-action="toggle-terminal" aria-pressed="true"><span aria-hidden="true">⌘</span> Terminal</button>
-            <button class="toolbar-button" type="button" data-action="toggle-inspector" aria-pressed="true"><span aria-hidden="true">◧</span> Alterações <b>12</b></button>
+            <button class="toolbar-button" type="button" data-action="toggle-inspector" aria-pressed="true"><span aria-hidden="true">◧</span> Alterações <b id="git-toolbar-count">0</b></button>
             <button class="icon-button" type="button" aria-label="Mais opções">•••</button>
             <div class="window-controls" aria-label="Controles da janela">
               <button class="window-control" id="window-minimize" type="button" title="Minimizar" aria-label="Minimizar">−</button>
@@ -152,7 +152,7 @@
                 <div class="settings-section-heading"><span class="settings-section-icon">{ }</span><div><h2 id="settings-editor-title">Editor</h2><p>Tipografia, navegação e representação do código.</p></div></div>
                 <div class="setting-row">
                   <div><strong>Tamanho da fonte</strong><small>Tamanho do código em pixels.</small></div>
-                  <div class="setting-stepper" aria-label="Tamanho da fonte do editor"><button type="button" data-setting-adjust="editorFontSize" data-delta="-1" aria-label="Diminuir fonte do editor">−</button><output id="editor-font-size-value">12 px</output><button type="button" data-setting-adjust="editorFontSize" data-delta="1" aria-label="Aumentar fonte do editor">＋</button></div>
+                  <div class="setting-stepper" aria-label="Tamanho da fonte do editor"><button type="button" data-setting-adjust="editorFontSize" data-delta="-1" aria-label="Diminuir fonte do editor">−</button><output id="editor-font-size-value">16 px</output><button type="button" data-setting-adjust="editorFontSize" data-delta="1" aria-label="Aumentar fonte do editor">＋</button></div>
                 </div>
                 <label class="setting-row"><span><strong>Família da fonte</strong><small>Usa fontes instaladas no sistema, com fallback seguro.</small></span><select data-setting="editorFontFamily"><option value="system">Monoespaçada do sistema</option><option value="jetbrains">JetBrains Mono</option><option value="fira">Fira Code</option><option value="consolas">Consolas</option></select></label>
                 <label class="setting-row"><span><strong>Largura da tabulação</strong><small>Número de espaços usados pelo editor.</small></span><select data-setting="tabSize"><option value="2">2 espaços</option><option value="4">4 espaços</option><option value="8">8 espaços</option></select></label>
@@ -254,6 +254,11 @@
               </div>
             </header>
             <div class="editor-breadcrumb" id="editor-breadcrumb" aria-label="Caminho do arquivo"></div>
+            <div class="editor-recovery" id="editor-recovery" hidden role="status">
+              <span>O arquivo mudou ou está indisponível. Seu rascunho foi preservado.</span>
+              <button type="button" class="secondary-button" id="recovery-copy">Salvar cópia…</button>
+              <button type="button" class="danger-button subtle-danger" id="recovery-reload">Descartar rascunho e reler</button>
+            </div>
             <div class="source-editor" id="source-editor" aria-label="Conteúdo do arquivo">
               <div class="editor-empty-state" id="editor-empty-state" aria-hidden="true">
                 <img id="editor-empty-icon" alt="">
@@ -261,6 +266,7 @@
             </div>
             <footer class="editor-statusbar">
               <span id="draft-state"><span class="status-dot"></span> Carregando workspace</span>
+              <span id="session-state" role="status"></span>
               <span id="cursor-position">Ln 1, Col 1</span>
               <span>Espaços: 2</span>
               <span id="language-mode">Texto</span>
@@ -270,24 +276,19 @@
 
           <aside class="inspector" id="inspector" aria-label="Inspector do projeto">
             <div class="inspector-tabs" role="tablist" aria-label="Inspector">
-              <button class="active" type="button" role="tab" aria-selected="true" data-tab="changes">Alterações <span>12</span></button>
+              <button class="active" type="button" role="tab" aria-selected="true" data-tab="changes">Alterações <span id="diff-count">0</span></button>
             </div>
-            <section class="tab-panel" data-panel="changes" aria-label="Alterações">
-              <div class="change-summary"><strong>12 arquivos alterados</strong><span class="added">+684</span><span class="removed">−201</span></div>
-              <div class="file-changes">
-                <button class="file-change active" type="button" data-file="ui/index.html"><span class="file-status modified">M</span><span><strong>index.html</strong><small>ui/</small></span><span class="lines"><i>+183</i><em>−42</em></span></button>
-                <button class="file-change" type="button" data-file="ui/styles.css"><span class="file-status modified">M</span><span><strong>styles.css</strong><small>ui/</small></span><span class="lines"><i>+291</i><em>−158</em></span></button>
-                <button class="file-change" type="button" data-file="ui/app.js"><span class="file-status added">A</span><span><strong>app.js</strong><small>ui/</small></span><span class="lines"><i>+142</i></span></button>
-                <button class="file-change" type="button" data-file="src-tauri/src/protocol.rs"><span class="file-status added">A</span><span><strong>protocol.rs</strong><small>src-tauri/src/</small></span><span class="lines"><i>+268</i></span></button>
+            <section class="tab-panel git-diff-panel" data-panel="changes" aria-label="Alterações">
+              <div class="diff-toolbar">
+                <label for="diff-scope">Comparar</label>
+                <select id="diff-scope"><option value="worktree">Não preparadas</option><option value="index">Preparadas para commit</option></select>
+                <button class="toolbar-button" type="button" data-action="refresh-git" aria-label="Atualizar alterações">↻</button>
               </div>
-              <div class="diff-header"><span>ui/index.html</span><button type="button">Side-by-side</button></div>
-              <pre class="diff" aria-label="Diff de ui/index.html"><code><span class="diff-info">@@ -1,4 +1,7 @@</span>
-<span class="diff-context"> &lt;body&gt;</span>
-<span class="diff-remove">-  &lt;main class="shell"&gt;</span>
-<span class="diff-add">+  &lt;div class="app-shell"&gt;</span>
-<span class="diff-add">+    &lt;aside class="sidebar"&gt;</span>
-<span class="diff-add">+      &lt;nav aria-label="Projetos"&gt;</span>
-<span class="diff-context">       ...</span></code></pre>
+              <p class="git-diff-note">O diff mostra o conteúdo salvo em disco. Rascunhos não salvos ficam no editor.</p>
+              <div class="file-changes" id="diff-files" aria-label="Arquivos alterados"></div>
+              <div class="diff-header"><span id="diff-path">Nenhum arquivo selecionado</span></div>
+              <p class="git-diff-note" id="diff-note" role="status">Abra um projeto Git para revisar alterações.</p>
+              <div id="git-diff-editor" class="git-diff-editor" aria-label="Diff do arquivo"></div>
             </section>
           </aside>
           <div class="panel-resizer workspace-resizer" id="workspace-resizer" role="separator" aria-label="Redimensionar painel direito" aria-orientation="vertical" tabindex="0"></div>
@@ -295,17 +296,38 @@
 
         <section class="terminal-dock" id="terminal" aria-label="Terminal integrado">
           <header class="terminal-header">
-            <div><button class="active" type="button" data-dock-view="terminal">Terminal</button><button type="button" data-dock-view="tasks">Tasks</button><button type="button">Problemas <span>0</span></button></div>
-            <div><span id="dock-context">/bin/bash</span><button class="icon-button" id="cancel-task-button" type="button" data-action="cancel-task" aria-label="Cancelar task" hidden>■</button><button class="icon-button" type="button" data-action="new-terminal" aria-label="Novo terminal">＋</button><button class="icon-button" type="button" data-action="close-terminal" aria-label="Fechar terminal">×</button></div>
+            <div><button class="active" type="button" data-dock-view="terminal">Terminal</button><button type="button" data-dock-view="tasks">Tasks</button><button type="button" data-dock-view="problems">Problemas <span id="problems-count">0</span></button></div>
+            <div><span id="dock-context">/bin/bash</span><button class="icon-button" id="cancel-task-button" type="button" data-action="cancel-task" aria-label="Cancelar task" hidden>■</button><button class="icon-button" type="button" data-action="new-terminal" aria-label="Reiniciar terminal" title="Reiniciar terminal">＋</button><button class="icon-button" type="button" data-action="close-terminal" aria-label="Ocultar painel do terminal">×</button></div>
           </header>
-          <pre class="terminal-output" id="terminal-output" tabindex="0" aria-label="Saída do terminal">Terminal local do Lyrnova · /bin/bash
-</pre>
+          <div class="terminal-emulator" id="terminal-output" aria-label="Terminal interativo" data-state="idle"></div>
           <pre class="terminal-output task-output" id="task-output" tabindex="0" aria-label="Saída da task" hidden>Nenhuma task executada nesta sessão.
 </pre>
-          <form class="terminal-form" id="terminal-form"><span class="terminal-prompt" aria-hidden="true">$</span><label class="visually-hidden" for="terminal-input">Comando</label><input id="terminal-input" type="text" autocomplete="off" spellcheck="false" placeholder="Digite um comando e pressione Enter"></form>
+          <div id="problems-panel" class="problems-panel" hidden>
+            <div class="problems-toolbar"><span id="language-status" role="status">Abra um arquivo Rust para analisar.</span><button type="button" class="secondary-button" id="language-enable">Ativar análise Rust…</button><button type="button" class="toolbar-button" id="language-restart" hidden>Reiniciar análise</button></div>
+            <p class="problems-scope">Análise inicial dos arquivos Rust abertos, sem dependências externas, biblioteca padrão, build scripts ou macros de procedimento.</p>
+            <div id="problems-list" aria-label="Diagnósticos dos arquivos abertos"></div>
+          </div>
         </section>
       </section>
     </div>
+
+    <dialog id="builtin-review-dialog" class="account-dialog" aria-labelledby="builtin-review-title">
+      <h2 id="builtin-review-title">Ativar plugin Rust</h2>
+      <p class="dialog-copy">O rust-analyzer instalado no computador analisará os arquivos Rust abertos. O processo usa o projeto somente para leitura, em ambiente isolado sem rede.</p>
+      <div id="builtin-permissions" class="plugin-permission-list"></div>
+      <p id="builtin-review-error" class="dialog-copy" role="status"></p>
+      <div class="approval-actions"><button type="button" class="secondary-button" id="builtin-review-cancel">Cancelar</button><button type="button" class="accent-button" id="builtin-review-confirm" disabled>Ativar com estas permissões</button></div>
+    </dialog>
+
+    <dialog id="git-commit-review-dialog" class="account-dialog git-commit-review-dialog" aria-labelledby="git-review-title">
+      <header class="dialog-heading"><span aria-hidden="true">⑂</span><h2 id="git-review-title">Revisar commit</h2><button class="icon-button" type="button" data-action="cancel-git-review" aria-label="Fechar revisão">×</button></header>
+      <p id="git-review-summary" class="dialog-copy"></p>
+      <pre id="git-review-message" class="git-review-message" aria-label="Mensagem de commit"></pre>
+      <p class="dialog-copy">Somente as alterações preparadas abaixo entrarão no commit local. Hooks e assinatura estão desativados.</p>
+      <div id="git-review-editor" class="git-review-editor" aria-label="Alterações preparadas para commit"></div>
+      <p id="git-review-note" class="dialog-copy" role="status"></p>
+      <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-git-review">Cancelar</button><button class="secondary-button" id="git-review-reload" type="button" data-action="reload-git-review" hidden>Revisar novamente</button><button class="accent-button" id="git-review-confirm" type="button" data-action="confirm-git-commit" disabled>Confirmar commit</button></div>
+    </dialog>
 
     <div class="palette-backdrop" id="command-palette" hidden>
       <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="palette-title">

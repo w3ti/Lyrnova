@@ -1,4 +1,6 @@
 import * as monaco from "monaco-editor";
+import { createTerminalView } from "./terminal.js";
+import { createRustDiagnostics } from "./language.js";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
@@ -28,8 +30,7 @@ const composer = document.querySelector("#composer");
 const prompt = document.querySelector("#prompt");
 const terminal = document.querySelector("#terminal");
 const terminalOutput = document.querySelector("#terminal-output");
-const terminalForm = document.querySelector("#terminal-form");
-const terminalInput = document.querySelector("#terminal-input");
+let terminalView = null;
 const palette = document.querySelector("#command-palette");
 const paletteInput = document.querySelector("#palette-input");
 const agentStatus = document.querySelector("#agent-status");
@@ -103,6 +104,17 @@ const gitChangesList = document.querySelector("#git-changes-list");
 const gitNote = document.querySelector("#git-note");
 const gitCommitMessage = document.querySelector("#git-commit-message");
 const gitCommitButton = document.querySelector("#git-commit-button");
+const diffScope = document.querySelector("#diff-scope");
+const diffFiles = document.querySelector("#diff-files");
+const diffNote = document.querySelector("#diff-note");
+const diffPath = document.querySelector("#diff-path");
+const diffCount = document.querySelector("#diff-count");
+const gitReviewDialog = document.querySelector("#git-commit-review-dialog");
+const gitReviewSummary = document.querySelector("#git-review-summary");
+const gitReviewMessage = document.querySelector("#git-review-message");
+const gitReviewNote = document.querySelector("#git-review-note");
+const gitReviewConfirm = document.querySelector("#git-review-confirm");
+const gitReviewReload = document.querySelector("#git-review-reload");
 const sidebarResizer = document.querySelector("#sidebar-resizer");
 const workspaceResizer = document.querySelector("#workspace-resizer");
 const taskList = document.querySelector("#task-list");
@@ -134,7 +146,7 @@ const DEFAULT_IDE_SETTINGS = Object.freeze({
   appFontSize: 16,
   interfaceDensity: "comfortable",
   reduceMotion: false,
-  editorFontSize: 12,
+  editorFontSize: 16,
   editorFontFamily: "system",
   tabSize: 2,
   wordWrap: "off",
@@ -151,6 +163,14 @@ let constrainPanelWidths = () => {};
 let projectCreationRunning = false;
 let gitMutationRunning = false;
 let currentGitStatus = null;
+let selectedDiffPath = null;
+let diffSequence = 0;
+let gitStatusSequence = 0;
+let gitReviewSequence = 0;
+let diffEditor = null;
+let commitReviewEditor = null;
+let pendingGitReview = null;
+let gitCommitExecuting = false;
 let currentPluginCatalog = [];
 let currentTrustedPluginCatalog = [];
 let pendingPluginReview = null;
@@ -252,11 +272,19 @@ Lyrnova é um IDE desktop comunitário e extensível. Ele reúne projetos,
 Explorer, editor, Git, terminal e plugins opcionais em uma interface própria.`],
 ]);
 
-const savedDocuments = new Map(documentFixtures);
-const draftDocuments = new Map(documentFixtures);
+const savedDocuments = new Map(invoke ? [] : documentFixtures);
+const draftDocuments = new Map(invoke ? [] : documentFixtures);
 const documentRevisions = new Map();
-const openDocuments = ["src-tauri/src/backend.rs"];
-let activeDocument = openDocuments[0];
+const openDocuments = invoke ? [] : ["src-tauri/src/backend.rs"];
+let activeDocument = openDocuments[0] ?? null;
+const documentViews = new Map();
+const recoveryConflicts = new Set();
+let editorSession = null;
+let sessionTimer = null;
+let sessionTransition = false;
+let editorGeneration = 0;
+let editorRestoring = false;
+let diagnosticsView = null;
 let workspaceEntries = [];
 const collapsedDirectories = new Set();
 let selectedWorkspacePath = null;
@@ -364,6 +392,7 @@ function applyIdeSettings(persist = true) {
     wordWrapColumn: 120,
   });
   document.documentElement.style.setProperty("--terminal-font-size", `${ideSettings.terminalFontSize}px`);
+  terminalView?.configure(ideSettings.terminalFontSize, appTheme !== "light", ideSettings.reduceMotion);
   renderSettingsControls();
   if (persist) {
     try { localStorage.setItem("lyrnova.ideSettings", JSON.stringify(ideSettings)); } catch { /* preferência não persistente */ }
@@ -445,6 +474,7 @@ function createPluginTag(text, tone = "neutral") {
 
 function renderPluginCatalog(plugins = currentPluginCatalog) {
   currentPluginCatalog = Array.isArray(plugins) ? plugins : [];
+  diagnosticsView?.configure(currentPluginCatalog);
   pluginList.replaceChildren();
   if (!currentPluginCatalog.length) {
     const empty = document.createElement("p");
@@ -501,7 +531,12 @@ function renderPluginCatalog(plugins = currentPluginCatalog) {
       remove.textContent = "Remover";
       actions.append(remove);
     }
-    if (plugin.installed) {
+    if (plugin.id === "io.github.w3ti.lyrnova.language.rust" && (!plugin.installed || plugin.requiresPermissionReview)) {
+      const review = document.createElement("button");
+      review.type = "button"; review.className = "secondary-button";
+      review.dataset.builtinReview = plugin.id; review.textContent = "Revisar permissões…";
+      actions.append(review);
+    } else if (plugin.installed) {
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "secondary-button";
@@ -744,6 +779,40 @@ async function confirmPluginInstall() {
   }
 }
 
+function openRustPermissionReview() {
+  const plugin = currentPluginCatalog.find(p => p.id === "io.github.w3ti.lyrnova.language.rust");
+  if (!plugin || !invoke || pluginMutationRunning) return;
+  const dialog = document.querySelector("#builtin-review-dialog");
+  const permissions = document.querySelector("#builtin-permissions");
+  const confirm = document.querySelector("#builtin-review-confirm");
+  document.querySelector("#builtin-review-error").textContent = "";
+  permissions.replaceChildren();
+  for (const permission of plugin.permissions) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.value = permission;
+    checkbox.checked = plugin.grantedPermissions.includes(permission);
+    const text = document.createElement("span"); text.textContent = pluginPermissionCopy(permission).join(" — ");
+    label.append(checkbox, text); permissions.append(label);
+  }
+  const validate = () => { confirm.disabled = ![...permissions.querySelectorAll("input")].every(input => input.checked); };
+  permissions.onchange = validate;
+  validate();
+  confirm.onclick = async () => {
+    if (pluginMutationRunning) return;
+    pluginMutationRunning = true; confirm.disabled = true;
+    try {
+      const plugins = await invoke("plugin_install", { pluginId: plugin.id, approvedPermissions: [...permissions.querySelectorAll("input:checked")].map(input => input.value) });
+      renderPluginCatalog(plugins); dialog.close();
+      announce("Plugin Rust ativado com as permissões revisadas");
+    } catch (error) {
+      document.querySelector("#builtin-review-error").textContent = pluginFlowErrorMessage(error);
+    } finally { pluginMutationRunning = false; validate(); }
+  };
+  document.querySelector("#builtin-review-cancel").onclick = () => { if (!pluginMutationRunning) dialog.close(); };
+  dialog.oncancel = event => { if (pluginMutationRunning) event.preventDefault(); };
+  dialog.showModal();
+}
+
 async function setPluginEnabled(pluginId, enabled) {
   if (!invoke || pluginMutationRunning) return;
   pluginMutationRunning = true;
@@ -846,6 +915,14 @@ function registerRustCompletions() {
 }
 
 function initializeCodeEditor() {
+  monaco.languages.register({ id: "lyrnova-diff" });
+  monaco.languages.setMonarchTokensProvider("lyrnova-diff", {
+    tokenizer: { root: [
+      [/^(diff |index |--- |\+\+\+ |@@|rename |new file |deleted file |Binary files).*$/, "diff.header"],
+      [/^\+.*$/, "diff.add"],
+      [/^-.*$/, "diff.remove"],
+    ] },
+  });
   monaco.editor.defineTheme("lyrnova-dark", {
     base: "vs-dark",
     inherit: true,
@@ -871,6 +948,9 @@ function initializeCodeEditor() {
       { token: "number", foreground: "e5bc60" },
       { token: "type", foreground: "77cce2" },
       { token: "type.identifier", foreground: "77cce2" },
+      { token: "diff.header", foreground: "77cce2" },
+      { token: "diff.add", foreground: "9fd6b8" },
+      { token: "diff.remove", foreground: "f0a5af" },
     ],
   });
   monaco.editor.defineTheme("lyrnova-light", {
@@ -898,6 +978,9 @@ function initializeCodeEditor() {
       { token: "number", foreground: "9a6414" },
       { token: "type", foreground: "176c83" },
       { token: "type.identifier", foreground: "176c83" },
+      { token: "diff.header", foreground: "176c83" },
+      { token: "diff.add", foreground: "287858" },
+      { token: "diff.remove", foreground: "9b3343" },
     ],
   });
   monaco.editor.defineTheme("lyrnova-high-contrast", {
@@ -919,6 +1002,9 @@ function initializeCodeEditor() {
       { token: "number", foreground: "FFE078" },
       { token: "type", foreground: "79E9FF" },
       { token: "type.identifier", foreground: "79E9FF" },
+      { token: "diff.header", foreground: "79E9FF" },
+      { token: "diff.add", foreground: "8DFFC5" },
+      { token: "diff.remove", foreground: "FF8FA1" },
     ],
   });
   registerRustCompletions();
@@ -942,7 +1028,7 @@ function initializeCodeEditor() {
     guides: { bracketPairs: true, indentation: true },
     largeFileOptimizations: true,
     lineDecorationsWidth: 14,
-    lineHeight: 20,
+    lineHeight: 0,
     lineNumbersMinChars: 4,
     minimap: { enabled: ideSettings.minimap, maxColumn: 90, renderCharacters: false },
     padding: { top: 10, bottom: 20 },
@@ -964,9 +1050,12 @@ function initializeCodeEditor() {
     if (!activeDocument || !codeEditor.getModel()) return;
     draftDocuments.set(activeDocument, codeEditor.getValue());
     updateDraftState();
+    scheduleEditorSession();
+    diagnosticsView?.changed();
   });
   codeEditor.onDidChangeModel(updateEditorEmptyState);
-  codeEditor.onDidChangeCursorPosition(updateCursorPosition);
+  codeEditor.onDidChangeCursorPosition(() => { updateCursorPosition(); scheduleEditorSession(); });
+  codeEditor.onDidScrollChange(scheduleEditorSession);
   codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { void saveDocument(); });
   codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
     if (activeDocument) void closeDocument(activeDocument);
@@ -983,6 +1072,7 @@ function toggleInspector(force) {
   if (next) appShell.dataset.chatOpen = "false";
   document.querySelectorAll('[data-action="toggle-inspector"]').forEach((button) => button.setAttribute("aria-pressed", String(next)));
   announce(next ? "Inspector aberto" : "Inspector fechado");
+  if (next) renderGitDiffFiles();
 }
 
 function toggleTerminal(force) {
@@ -991,59 +1081,30 @@ function toggleTerminal(force) {
   if (next) {
     if (dockView === "terminal") {
       void startTerminal();
-      window.requestAnimationFrame(() => terminalInput.focus());
+      window.requestAnimationFrame(() => terminalView?.focus());
     }
   }
   document.querySelectorAll('[data-action="toggle-terminal"]').forEach((button) => button.setAttribute("aria-pressed", String(next)));
   announce(next ? "Terminal aberto" : "Terminal fechado");
 }
 
-function appendTerminalOutput(data) {
-  terminalOutput.textContent += data;
-  if (terminalOutput.textContent.length > 250_000) {
-    terminalOutput.textContent = terminalOutput.textContent.slice(-200_000);
-  }
-  terminalOutput.scrollTop = terminalOutput.scrollHeight;
-}
-
 async function startTerminal(restart = false) {
-  if (!invoke) return;
-  if (!currentProject) {
-    appendTerminalOutput("\n[Abra ou crie um projeto antes de iniciar o terminal]\n");
-    return;
-  }
-  try {
-    if (restart) {
-      await invoke("terminal_stop");
-      terminalOutput.textContent = "Terminal reiniciado · /bin/bash\n";
-    }
-    await invoke("terminal_start");
-  } catch {
-    appendTerminalOutput("\n[Não foi possível iniciar o terminal local]\n");
-  }
-}
-
-async function bindTerminalOutput() {
-  if (!listen) return;
-  try {
-    await listen("terminal-output", ({ payload }) => appendTerminalOutput(payload.data));
-  } catch {
-    appendTerminalOutput("\n[Streaming do terminal indisponível]\n");
-  }
+  if (!currentProject) return;
+  await terminalView?.start(restart);
 }
 
 function setDockView(view) {
-  dockView = view === "tasks" ? "tasks" : "terminal";
+  dockView = ["tasks", "problems"].includes(view) ? view : "terminal";
   const showingTasks = dockView === "tasks";
-  terminalOutput.hidden = showingTasks;
-  terminalForm.hidden = showingTasks;
+  terminalOutput.hidden = dockView !== "terminal";
+  document.querySelector("#problems-panel").hidden = dockView !== "problems";
   taskOutput.hidden = !showingTasks;
-  dockContext.textContent = showingTasks ? (runningTask?.label || "Saída de Tasks") : "/bin/bash";
+  dockContext.textContent = showingTasks ? (runningTask?.label || "Saída de Tasks") : dockView === "problems" ? "Diagnósticos Rust" : "/bin/bash";
   cancelTaskButton.hidden = !showingTasks || !runningTask;
   document.querySelectorAll("[data-dock-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.dockView === dockView);
   });
-  if (!showingTasks) void startTerminal();
+  if (dockView === "terminal") void startTerminal();
 }
 
 function appendTaskOutput(data) {
@@ -1524,10 +1585,18 @@ function bindWindowControls() {
       await syncWindowState();
     } catch { /* mantém o shell utilizável */ }
   });
-  close.addEventListener("click", () => {
-    if (hasDirtyDocuments() && !window.confirm("Há rascunhos alterados em memória. Fechar o Lyrnova e descartá-los?")) return;
-    void currentWindow?.close();
-  });
+  close.addEventListener("click", () => { void currentWindow?.close(); });
+  if (currentWindow) void currentWindow.onCloseRequested(async (event) => {
+    if (sessionTransition || editorRestoring) { event.preventDefault(); return; }
+    sessionTransition = true;
+    codeEditor.updateOptions({ readOnly: true });
+    const saved = await flushEditorSession();
+    if (!saved && !window.confirm("Não foi possível guardar a sessão. Fechar mesmo assim pode perder rascunhos. Fechar?")) {
+      event.preventDefault();
+      sessionTransition = false;
+      codeEditor.updateOptions({ readOnly: false });
+    }
+  }).catch(() => setSessionStatus("Falha na proteção ao fechar", "error"));
   setMaximizeControl(false);
   void syncWindowState();
 }
@@ -1601,7 +1670,8 @@ function renderGitList(container, entries, side) {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "git-file-open";
-    if (kind !== "deleted") open.dataset.file = change.path;
+    open.dataset.gitDiffPath = change.path;
+    open.dataset.gitDiffScope = side;
     open.title = change.previousPath
       ? `${title}: ${change.previousPath} → ${change.path}`
       : `${title}: ${change.path}`;
@@ -1638,9 +1708,11 @@ function renderGitList(container, entries, side) {
 function updateGitCommitButton() {
   const hasStaged = currentGitStatus?.changes?.some((change) => change.index) ?? false;
   gitCommitButton.disabled = gitMutationRunning || !hasStaged || !gitCommitMessage.value.trim();
+  document.querySelectorAll("[data-git-action]").forEach((button) => { button.disabled = gitMutationRunning; });
 }
 
 function renderGitStatus(status) {
+  ++gitStatusSequence;
   currentGitStatus = status;
   const staged = status.changes.filter((change) => change.index);
   const worktree = status.changes.filter((change) => change.worktree);
@@ -1663,21 +1735,29 @@ function renderGitStatus(status) {
     ? `Acompanha ${status.upstream}${status.commit ? ` · ${status.commit}` : ""} · push desativado`
     : `${status.commit ? `${status.commit} · ` : ""}push desativado`;
   updateGitCommitButton();
+  renderGitDiffFiles();
 }
 
 async function loadGitStatus() {
   if (!invoke) return;
+  const sequence = ++gitStatusSequence;
   gitBranchSummary.textContent = "Atualizando…";
   try {
-    renderGitStatus(await invoke("git_status"));
+    const status = await invoke("git_status");
+    if (sequence !== gitStatusSequence) return;
+    renderGitStatus(status);
   } catch (error) {
+    if (sequence !== gitStatusSequence) return;
     currentGitStatus = null;
+    renderGitDiffFiles();
     updateGitCommitButton();
     const unavailable = error?.code === "git_unavailable";
     gitBranchName.textContent = "Git indisponível";
     gitBranchSummary.textContent = unavailable ? "Executável git não encontrado" : "Não foi possível ler o repositório";
     projectGitSummary.textContent = "Git indisponível";
     gitChangesList.replaceChildren();
+    gitStagedList.replaceChildren();
+    gitStagedGroup.hidden = true;
     const message = document.createElement("p");
     message.className = "git-empty";
     message.textContent = "O status não pôde ser carregado. Seus arquivos não foram alterados.";
@@ -1702,26 +1782,324 @@ async function runGitFileAction(action, path) {
   }
 }
 
-async function commitGitChanges() {
+function gitErrorMessage(error) {
+  return ({
+    review_changed: "As alterações preparadas ou a branch mudaram. Revise novamente antes de confirmar.",
+    review_expired: "A revisão expirou ou já foi utilizada. Revise novamente.",
+    operation_in_progress: "Conclua os conflitos, merge, rebase ou cherry-pick no terminal antes de criar este commit.",
+    diff_too_large: "O diff ultrapassa o limite de revisão. Prepare um conjunto menor de alterações ou revise e faça o commit pelo terminal.",
+    non_text_diff: "Este diff contém dados binários ou texto fora de UTF-8 e não pode ser exibido com segurança.",
+    change_not_found: "Esta alteração não está mais disponível. Atualize o status do Git.",
+    invalid_message: "Informe uma mensagem de commit válida.",
+    invalid_path: "Este caminho não pode ser lido dentro do projeto.",
+    timed_out: "O Git excedeu o tempo de leitura. Tente um conjunto menor de alterações.",
+  })[error?.code] ?? "Não foi possível concluir a operação Git. Confira o repositório e a identidade de commit no terminal.";
+}
+
+function createPatchEditor(container, label) {
+  return monaco.editor.create(container, {
+    value: "", language: "lyrnova-diff", readOnly: true, domReadOnly: true,
+    automaticLayout: true, ariaLabel: label, accessibilitySupport: "auto",
+    minimap: { enabled: false }, fontSize: ideSettings.editorFontSize,
+    fontFamily: editorFontFamilyCss(ideSettings.editorFontFamily),
+    scrollBeyondLastLine: false, renderLineHighlight: "none", wordWrap: "off",
+  });
+}
+
+function clearGitDiff(message) {
+  ++diffSequence;
+  diffEditor?.setValue("");
+  diffPath.textContent = selectedDiffPath ?? "Nenhum arquivo selecionado";
+  diffNote.textContent = message;
+}
+
+function renderGitDiffFiles() {
+  document.querySelector("#git-toolbar-count").textContent = String(currentGitStatus?.changes.length ?? 0);
+  const changes = currentGitStatus?.changes.filter((change) => change[diffScope.value]) ?? [];
+  diffCount.textContent = String(changes.length);
+  diffFiles.replaceChildren();
+  if (!changes.some((change) => change.path === selectedDiffPath)) selectedDiffPath = changes[0]?.path ?? null;
+  for (const change of changes) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `file-change${change.path === selectedDiffPath ? " active" : ""}`;
+    button.dataset.gitDiffPath = change.path;
+    button.dataset.gitDiffScope = diffScope.value;
+    button.setAttribute("aria-pressed", String(change.path === selectedDiffPath));
+    const marker = document.createElement("span");
+    const [letter, label] = gitKindPresentation(change[diffScope.value]);
+    marker.className = "file-status";
+    marker.textContent = letter;
+    const path = document.createElement("span");
+    path.textContent = change.previousPath ? `${change.previousPath} → ${change.path}` : change.path;
+    button.title = `${label}: ${path.textContent}`;
+    button.append(marker, path);
+    diffFiles.append(button);
+  }
+  if (!selectedDiffPath) {
+    clearGitDiff(!currentGitStatus ? "Abra um projeto Git para revisar alterações." : (diffScope.value === "index" ? "Nenhuma alteração preparada para commit." : "Nenhuma alteração não preparada."));
+    return;
+  }
+  if (appShell.dataset.inspectorOpen === "true") void loadSelectedGitDiff();
+  else clearGitDiff("");
+}
+
+async function loadSelectedGitDiff() {
+  if (!invoke || !selectedDiffPath) return;
+  clearGitDiff("Carregando diff…");
+  const sequence = diffSequence;
+  const path = selectedDiffPath;
+  try {
+    const diff = await invoke("git_diff", { path, scope: diffScope.value });
+    if (sequence !== diffSequence) return;
+    diffEditor ??= createPatchEditor(document.querySelector("#git-diff-editor"), "Diff do arquivo, somente leitura");
+    diffEditor.setValue(diff.patch);
+    diffEditor.setScrollTop(0);
+    diffNote.textContent = diff.truncated ? "Exibição parcial: o diff ultrapassa 1 MiB ou 12.000 linhas. Revise o restante no terminal." : (diff.patch ? "" : "Não há diferença textual; o estado pode ter mudado ou somente os metadados foram alterados.");
+  } catch (error) {
+    if (sequence !== diffSequence) return;
+    clearGitDiff(gitErrorMessage(error));
+  }
+}
+
+async function showGitCommitReview() {
   if (!invoke || gitMutationRunning || gitCommitButton.disabled) return;
+  cancelGitReview();
+  const sequence = ++gitReviewSequence;
+  gitReviewDialog.showModal();
+  gitReviewSummary.textContent = "Carregando alterações preparadas…";
+  gitReviewMessage.textContent = gitCommitMessage.value.trim();
+  gitReviewNote.textContent = "";
+  gitReviewReload.hidden = true;
+  commitReviewEditor ??= createPatchEditor(document.querySelector("#git-review-editor"), "Diff completo preparado para commit, somente leitura");
+  commitReviewEditor.setValue("");
+  try {
+    const review = await invoke("git_commit_review", { message: gitCommitMessage.value });
+    if (sequence !== gitReviewSequence) {
+      void invoke("git_commit_review_discard", { token: review.token }).catch(() => {});
+      return;
+    }
+    pendingGitReview = review;
+    gitReviewSummary.textContent = `${review.branch} · ${review.files} ${review.files === 1 ? "arquivo preparado" : "arquivos preparados"}`;
+    gitReviewMessage.textContent = review.message;
+    commitReviewEditor.setValue(review.diff.patch);
+    commitReviewEditor.setScrollTop(0);
+    gitReviewConfirm.disabled = false;
+    gitReviewNote.textContent = "Revise o diff e confirme. Esta revisão é válida por cinco minutos.";
+  } catch (error) {
+    if (sequence !== gitReviewSequence) return;
+    gitReviewSummary.textContent = "Revisão indisponível";
+    gitReviewNote.textContent = gitErrorMessage(error);
+    gitReviewReload.hidden = false;
+  }
+}
+
+function cancelGitReview() {
+  if (gitCommitExecuting) return;
+  ++gitReviewSequence;
+  const token = pendingGitReview?.token;
+  pendingGitReview = null;
+  gitReviewConfirm.disabled = true;
+  commitReviewEditor?.setValue("");
+  if (gitReviewDialog.open) gitReviewDialog.close();
+  if (token && invoke) void invoke("git_commit_review_discard", { token }).catch(() => {});
+}
+
+async function commitGitChanges() {
+  if (!invoke || gitMutationRunning || !pendingGitReview || gitReviewConfirm.disabled) return;
+  const review = pendingGitReview;
+  pendingGitReview = null;
+  gitCommitExecuting = true;
   gitMutationRunning = true;
+  gitReviewConfirm.disabled = true;
+  gitReviewNote.textContent = "Criando commit local…";
   updateGitCommitButton();
   try {
-    const status = await invoke("git_commit", { message: gitCommitMessage.value });
+    await invoke("git_commit", { token: review.token });
     gitCommitMessage.value = "";
-    renderGitStatus(status);
+    gitReviewDialog.close();
+    await loadGitStatus();
     announce("Commit criado localmente");
   } catch (error) {
-    announce(error?.code === "invalid_message" ? "Informe uma mensagem de commit válida" : "Não foi possível criar o commit local");
+    commitReviewEditor.setValue("");
+    gitReviewNote.textContent = gitErrorMessage(error);
+    gitReviewReload.hidden = false;
+    announce(gitReviewNote.textContent);
+    await loadGitStatus();
   } finally {
+    gitCommitExecuting = false;
     gitMutationRunning = false;
     updateGitCommitButton();
   }
 }
 
 function isDirty(path) {
-  return draftDocuments.get(path) !== savedDocuments.get(path);
+  return recoveryConflicts.has(path) || draftDocuments.get(path) !== savedDocuments.get(path);
 }
+
+function setSessionStatus(message, state = "") {
+  const status = document.querySelector("#session-state");
+  status.textContent = message;
+  status.dataset.state = state;
+  status.title = message;
+}
+
+function captureDocumentView() {
+  if (!activeDocument || !codeEditor?.getModel()) return;
+  const position = codeEditor.getPosition();
+  documentViews.set(activeDocument, {
+    line: position.lineNumber, column: position.column,
+    scrollTop: Math.max(0, Math.round(codeEditor.getScrollTop())),
+    scrollLeft: Math.max(0, Math.round(codeEditor.getScrollLeft())),
+  });
+}
+
+function editorSessionSnapshot() {
+  captureDocumentView();
+  return {
+    version: 1, active: activeDocument,
+    documents: openDocuments.map((path) => ({
+      path, revision: documentRevisions.get(path) ?? null,
+      draft: isDirty(path) ? draftDocuments.get(path) : null,
+      ...(documentViews.get(path) ?? { line: 1, column: 1, scrollTop: 0, scrollLeft: 0 }),
+    })),
+  };
+}
+
+function scheduleEditorSession() {
+  if (!editorSession?.ready || sessionTransition || sessionTimer) return;
+  setSessionStatus("Guardando sessão…", "pending");
+  // Fixed delay: continuous typing must not postpone recovery indefinitely.
+  sessionTimer = setTimeout(() => { sessionTimer = null; void flushEditorSession(); }, 500);
+}
+
+async function flushEditorSession() {
+  if (!invoke || !currentProject) return true;
+  const context = editorSession;
+  if (!context?.ready) return false;
+  clearTimeout(sessionTimer);
+  sessionTimer = null;
+  // Each caller joins one queue, including close and project-switch flushes.
+  context.pending = (context.pending ?? Promise.resolve()).then(async () => {
+    if (editorSession !== context || !context.ready) return false;
+    const snapshot = editorSessionSnapshot();
+    const serialized = JSON.stringify(snapshot);
+    if (serialized === context.lastSaved) {
+      setSessionStatus("Sessão guardada", "saved");
+      return true;
+    }
+    try {
+      const token = await invoke("editor_session_save", { workspace: context.workspace, token: context.token, session: snapshot });
+      if (editorSession !== context) return false;
+      context.token = token;
+      context.lastSaved = serialized;
+      if (JSON.stringify(editorSessionSnapshot()) === serialized) setSessionStatus("Sessão guardada", "saved");
+      else scheduleEditorSession();
+      return true;
+    } catch (error) {
+      if (editorSession === context) {
+        if (error === "conflict" || error === "workspace_changed") context.ready = false;
+        setSessionStatus(error === "conflict" ? "Sessão alterada por outra instância" : "Falha ao guardar sessão; rascunhos em memória", "error");
+      }
+      return false;
+    }
+  });
+  return context.pending;
+}
+
+async function prepareProjectTransition() {
+  sessionTransition = true;
+  codeEditor.updateOptions({ readOnly: true });
+  if (await flushEditorSession() || !hasDirtyDocuments()) return true;
+  sessionTransition = false;
+  codeEditor.updateOptions({ readOnly: false });
+  announce("Não foi possível guardar a sessão. Salve ou copie seus rascunhos antes de trocar de projeto.");
+  return false;
+}
+
+async function restoreEditorSession() {
+  if (!invoke || !currentProject) return;
+  editorRestoring = true;
+  try {
+    const context = { workspace: currentProject.path, ready: false, token: null, lastSaved: null, pending: null };
+    editorSession = context;
+    let loaded;
+    try {
+      loaded = await invoke("editor_session_load", { workspace: context.workspace });
+    } catch {
+      setSessionStatus("Recuperação indisponível; sessão anterior preservada", "error");
+      const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
+      if (firstFile) await openDocument(firstFile.path, false, null, true);
+      return;
+    }
+    if (editorSession !== context) return;
+    context.token = loaded.token;
+    let recovered = 0;
+    let unavailable = 0;
+    for (const doc of loaded.session?.documents ?? []) {
+      let disk = null;
+      try { disk = await invoke("workspace_read", { path: doc.path }); } catch { /* retain missing-file drafts */ }
+      if (editorSession !== context) return;
+      if (!disk && doc.draft === null) { unavailable++; continue; }
+      savedDocuments.set(doc.path, disk?.content);
+      draftDocuments.set(doc.path, doc.draft ?? disk.content);
+      const revision = doc.draft !== null ? doc.revision : disk.revision;
+      if (revision) documentRevisions.set(doc.path, revision);
+      if (doc.draft !== null) {
+        recovered++;
+        if (!disk || disk.revision !== doc.revision) recoveryConflicts.add(doc.path);
+      }
+      documentViews.set(doc.path, { line: doc.line, column: doc.column, scrollTop: doc.scrollTop, scrollLeft: doc.scrollLeft });
+      openDocuments.push(doc.path);
+    }
+    if (loaded.session) {
+      const selected = openDocuments.includes(loaded.session.active) ? loaded.session.active : openDocuments[0];
+      if (selected) await openDocument(selected, false, null, true);
+      else updateEditorEmptyState();
+    } else {
+      const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
+      if (firstFile) await openDocument(firstFile.path, false, null, true);
+    }
+    context.ready = true;
+    if (recovered || unavailable) announce(`${recovered} rascunho(s) recuperado(s). ${unavailable} arquivo(s) indisponível(is).`);
+    await flushEditorSession();
+  } finally { editorRestoring = false; }
+}
+
+async function reloadRecoveredDocument() {
+  const path = activeDocument;
+  const generation = editorGeneration;
+  if (!invoke || !path || sessionTransition || !window.confirm(`Descartar o rascunho de ${documentName(path)} e reler o disco?`)) return;
+  try {
+    const snapshot = await invoke("workspace_read", { path });
+    if (generation !== editorGeneration) return;
+    savedDocuments.set(path, snapshot.content);
+    documentRevisions.set(path, snapshot.revision);
+    draftDocuments.set(path, snapshot.content);
+    recoveryConflicts.delete(path);
+    editorModels.get(path)?.setValue(snapshot.content);
+    if (path === activeDocument) updateDraftState();
+    scheduleEditorSession();
+  } catch { setEditorError("Arquivo indisponível; seu rascunho foi preservado"); }
+}
+
+async function copyRecoveredDocument() {
+  const path = activeDocument;
+  if (!invoke || !path || sessionTransition) return;
+  const generation = editorGeneration;
+  const destination = window.prompt("Salvar rascunho em um novo caminho relativo ao projeto:", `${path}.recuperado`);
+  if (!destination) return;
+  try {
+    await invoke("workspace_create_document", { request: { path: destination, content: draftDocuments.get(path) } });
+    if (generation !== editorGeneration) return;
+    await loadWorkspaceTree();
+    await openDocument(destination);
+    announce("Cópia salva. O rascunho original continua disponível na sua aba.");
+  } catch { setEditorError("Não foi possível criar a cópia; escolha um caminho novo dentro do projeto"); }
+}
+
+document.querySelector("#recovery-copy").addEventListener("click", () => { void copyRecoveredDocument(); });
+document.querySelector("#recovery-reload").addEventListener("click", () => { void reloadRecoveredDocument(); });
 
 function renderEditorTabs() {
   editorTabs.replaceChildren();
@@ -1761,12 +2139,21 @@ function renderEditorTabs() {
 }
 
 async function closeDocument(path) {
+  if (sessionTransition || editorRestoring) return;
   if (ideSettings.confirmDirtyClose && isDirty(path) && !window.confirm(`Fechar ${documentName(path)} e descartar as alterações não salvas?`)) return;
   const index = openDocuments.indexOf(path);
   if (index < 0) return;
   openDocuments.splice(index, 1);
+  recoveryConflicts.delete(path);
+  documentViews.delete(path);
+  scheduleEditorSession();
+  diagnosticsView?.changed();
 
-  if (isDirty(path)) draftDocuments.set(path, savedDocuments.get(path));
+  if (invoke) {
+    draftDocuments.delete(path);
+    savedDocuments.delete(path);
+    documentRevisions.delete(path);
+  } else draftDocuments.set(path, savedDocuments.get(path));
   editorModels.get(path)?.dispose();
   editorModels.delete(path);
 
@@ -1782,6 +2169,7 @@ async function closeDocument(path) {
   }
 
   activeDocument = null;
+  document.querySelector("#editor-recovery").hidden = true;
   codeEditor.setModel(null);
   editorBreadcrumb.textContent = "Nenhum arquivo aberto";
   languageMode.textContent = "Texto";
@@ -1812,6 +2200,7 @@ function updateEditorEmptyState() {
 }
 
 function updateDraftState() {
+  document.querySelector("#editor-recovery").hidden = !recoveryConflicts.has(activeDocument);
   const dirty = isDirty(activeDocument);
   editorWorkspace.dataset.clean = String(!dirty);
   editorWorkspace.dataset.saveState = dirty ? "dirty" : "clean";
@@ -1974,10 +2363,13 @@ function showWorkspaceView(view, focusEditor = false) {
   announce("Editor central focado");
 }
 
-async function openDocument(path, focusEditor = true, targetLine = null) {
-  if (invoke && !documentRevisions.has(path)) {
+async function openDocument(path, focusEditor = true, targetLine = null, restoring = false) {
+  if (sessionTransition || (editorRestoring && !restoring)) return;
+  const generation = editorGeneration;
+  if (invoke && !draftDocuments.has(path)) {
     try {
       const snapshot = await invoke("workspace_read", { path });
+      if (generation !== editorGeneration || sessionTransition) return;
       savedDocuments.set(path, snapshot.content);
       draftDocuments.set(path, snapshot.content);
       documentRevisions.set(path, snapshot.revision);
@@ -1988,7 +2380,8 @@ async function openDocument(path, focusEditor = true, targetLine = null) {
       }
     }
   }
-  if (!draftDocuments.has(path)) return;
+  if (generation !== editorGeneration || sessionTransition || !draftDocuments.has(path)) return;
+  captureDocumentView();
   if (!openDocuments.includes(path)) openDocuments.push(path);
   activeDocument = path;
   let model = editorModels.get(path);
@@ -1998,6 +2391,11 @@ async function openDocument(path, focusEditor = true, targetLine = null) {
     editorModels.set(path, model);
   }
   codeEditor.setModel(model);
+  const view = documentViews.get(path);
+  if (view) {
+    codeEditor.setPosition({ lineNumber: view.line, column: view.column });
+    codeEditor.setScrollPosition({ scrollTop: view.scrollTop, scrollLeft: view.scrollLeft });
+  }
   if (Number.isInteger(targetLine) && targetLine > 0) {
     const lineNumber = Math.min(targetLine, model.getLineCount());
     codeEditor.setPosition({ lineNumber, column: 1 });
@@ -2009,15 +2407,23 @@ async function openDocument(path, focusEditor = true, targetLine = null) {
   updateDraftState();
   toggleInspector(false);
   showWorkspaceView("editor", focusEditor);
+  scheduleEditorSession();
+  diagnosticsView?.changed();
 }
 
 async function saveDocument() {
+  if (sessionTransition || editorRestoring) return;
+  const generation = editorGeneration;
   const path = activeDocument;
   if (!path || !codeEditor.getModel()) return;
   const submittedContent = codeEditor.getValue();
   draftDocuments.set(path, submittedContent);
   const expectedRevision = documentRevisions.get(path);
-  if (!invoke || !expectedRevision) {
+  if (invoke && (!expectedRevision || recoveryConflicts.has(path))) {
+    setEditorError("Rascunho preservado: salve uma cópia ou releia o arquivo do disco");
+    return;
+  }
+  if (!invoke) {
     savedDocuments.set(path, submittedContent);
     updateDraftState();
     announce(`${documentName(path)} salvo apenas na memória`);
@@ -2032,14 +2438,19 @@ async function saveDocument() {
         expectedRevision,
       },
     });
+    if (generation !== editorGeneration) return;
     savedDocuments.set(path, snapshot.content);
     documentRevisions.set(path, snapshot.revision);
+    scheduleEditorSession();
     if (activeDocument === path) updateDraftState();
     else renderEditorTabs();
     void loadGitStatus();
     announce(`${documentName(path)} salvo no disco`);
   } catch (error) {
     if (error?.code === "conflict") {
+      recoveryConflicts.add(path);
+      updateDraftState();
+      scheduleEditorSession();
       setEditorError("Conflito: o arquivo mudou no disco; seu rascunho foi preservado");
     } else {
       setEditorError("Falha ao salvar; seu rascunho foi preservado");
@@ -2354,6 +2765,19 @@ function renderNoProject() {
 }
 
 function clearEditorWorkspace() {
+  diagnosticsView?.reset();
+  ++editorGeneration;
+  clearTimeout(sessionTimer);
+  sessionTimer = null;
+  editorSession = null;
+  documentViews.clear();
+  recoveryConflicts.clear();
+  setSessionStatus("");
+  ++gitStatusSequence;
+  currentGitStatus = null;
+  selectedDiffPath = null;
+  cancelGitReview();
+  renderGitDiffFiles();
   editorModels.forEach((model) => model.dispose());
   editorModels.clear();
   savedDocuments.clear();
@@ -2365,6 +2789,7 @@ function clearEditorWorkspace() {
   workspaceRecovery.hidden = true;
   fileFilter.value = "";
   activeDocument = null;
+  document.querySelector("#editor-recovery").hidden = true;
   codeEditor.setModel(null);
   editorTabs.replaceChildren();
   editorBreadcrumb.replaceChildren();
@@ -2375,22 +2800,25 @@ async function openProjectDialog() {
   if (!invoke) return;
   if (agentTurnRunning) { announce("Aguarde o turno atual terminar antes de trocar de projeto"); return; }
   if (runningTask) { announce("Cancele ou aguarde a Task atual antes de trocar de projeto"); return; }
-  if (hasDirtyDocuments() && !window.confirm("Há arquivos não salvos. Abrir outro projeto descartará esses rascunhos. Continuar?")) return;
+  if (sessionTransition || editorRestoring || !await prepareProjectTransition()) return;
   try {
     const project = await invoke("project_open_dialog");
     if (!project) return;
     renderProjectSummary(project);
     clearEditorWorkspace();
+    sessionTransition = false;
     activeAgentThreadId = null;
     streamedAgentMessages.clear();
-    terminalOutput.textContent = `Terminal local do Lyrnova · ${project.path}\n`;
+    terminalView?.reset();
     await Promise.all([loadWorkspaceTree(), loadGitStatus(), loadTasks()]);
-    const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
-    if (firstFile) await openDocument(firstFile.path, false);
+    await restoreEditorSession();
     if (!terminal.hidden) await startTerminal();
     announce(`Projeto ${project.name} aberto`);
   } catch {
     announce("Não foi possível abrir o projeto selecionado");
+  } finally {
+    sessionTransition = false;
+    codeEditor.updateOptions({ readOnly: false });
   }
 }
 
@@ -2421,7 +2849,7 @@ async function createProject() {
     announce("Aguarde o turno atual terminar antes de criar um projeto");
     return;
   }
-  if (hasDirtyDocuments() && !window.confirm("Há arquivos não salvos. Criar outro projeto descartará esses rascunhos. Continuar?")) return;
+  if (sessionTransition || editorRestoring || !await prepareProjectTransition()) return;
   projectCreationRunning = true;
   projectSubmit.disabled = true;
   projectSubmit.textContent = "Criando…";
@@ -2435,12 +2863,12 @@ async function createProject() {
     closeCreateProjectDialog();
     renderProjectSummary(project);
     clearEditorWorkspace();
+    sessionTransition = false;
     activeAgentThreadId = null;
     streamedAgentMessages.clear();
-    terminalOutput.textContent = `Terminal local do Lyrnova · ${project.path}\n`;
+    terminalView?.reset();
     await Promise.all([loadWorkspaceTree(), loadGitStatus(), loadTasks()]);
-    const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
-    if (firstFile) await openDocument(firstFile.path, false);
+    await restoreEditorSession();
     if (!terminal.hidden) await startTerminal();
     announce(project.hasGit ? `Projeto ${project.name} criado com Git` : `Projeto ${project.name} criado`);
   } catch (error) {
@@ -2451,6 +2879,8 @@ async function createProject() {
         : "Não foi possível criar o projeto.";
     projectCreateNote.hidden = false;
   } finally {
+    sessionTransition = false;
+    codeEditor.updateOptions({ readOnly: false });
     projectCreationRunning = false;
     projectSubmit.disabled = false;
     projectSubmit.textContent = "Escolher local e criar";
@@ -2830,6 +3260,8 @@ function showChanges() {
   toggleInspector(true);
   document.querySelector('[data-tab="changes"]').click();
   closePalette();
+  renderGitDiffFiles();
+  void loadGitStatus();
 }
 
 document.addEventListener("click", (event) => {
@@ -2862,7 +3294,9 @@ document.addEventListener("click", (event) => {
     if (action === "refresh-tasks") void loadTasks();
     if (action === "cancel-task-review") void cancelTaskReview();
     if (action === "cancel-task") void cancelRunningTask();
-    if (action === "git-commit") void commitGitChanges();
+    if (action === "git-commit" || action === "reload-git-review") void showGitCommitReview();
+    if (action === "confirm-git-commit") void commitGitChanges();
+    if (action === "cancel-git-review") cancelGitReview();
     if (action === "open-project") void openProjectDialog();
     if (action === "create-project") openCreateProjectDialog();
     if (action === "close-project-dialog") closeCreateProjectDialog();
@@ -2905,6 +3339,14 @@ document.addEventListener("click", (event) => {
   const gitAction = event.target.closest("[data-git-action]");
   if (gitAction) void runGitFileAction(gitAction.dataset.gitAction, gitAction.dataset.gitPath);
 
+  const gitDiff = event.target.closest("[data-git-diff-path]");
+  if (gitDiff) {
+    selectedDiffPath = gitDiff.dataset.gitDiffPath;
+    diffScope.value = gitDiff.dataset.gitDiffScope;
+    toggleInspector(true);
+    renderGitDiffFiles();
+  }
+
   const pluginToggle = event.target.closest("[data-plugin-toggle]");
   if (pluginToggle) {
     void setPluginEnabled(pluginToggle.dataset.pluginToggle, pluginToggle.dataset.enable === "true");
@@ -2918,6 +3360,8 @@ document.addEventListener("click", (event) => {
 
   const task = event.target.closest("[data-task-plugin][data-task-id]");
   if (task) void showTaskReview(task.dataset.taskPlugin, task.dataset.taskId);
+
+  if (event.target.closest("[data-builtin-review]")) openRustPermissionReview();
 
   const dock = event.target.closest("[data-dock-view]");
   if (dock) setDockView(dock.dataset.dockView);
@@ -3039,17 +3483,6 @@ projectForm.addEventListener("submit", (event) => {
   void createProject();
 });
 
-terminalForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const command = terminalInput.value;
-  if (!command || !invoke) return;
-  appendTerminalOutput(`$ ${command}\n`);
-  terminalInput.value = "";
-  void invoke("terminal_write", { input: command }).catch(() => {
-    appendTerminalOutput("[Falha ao enviar comando]\n");
-  });
-});
-
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = prompt.value.trim();
@@ -3079,6 +3512,7 @@ document.querySelectorAll("[data-setting]").forEach((control) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.target.closest?.(".xterm") && !(event.ctrlKey && event.key === "`")) return;
   if (event.key === "Escape") { closePalette(); appShell.dataset.sidebarOpen = "false"; }
   if (event.ctrlKey && event.key.toLowerCase() === "k") { event.preventDefault(); openPalette(); }
   if (event.ctrlKey && event.key === ",") { event.preventDefault(); switchActivity("settings"); }
@@ -3100,10 +3534,20 @@ systemDarkTheme.addEventListener("change", () => {
   if (ideSettings.appTheme === "system") applyIdeSettings(false);
 });
 
+diagnosticsView = createRustDiagnostics({
+  invoke, monaco, getWorkspace: () => currentProject?.path,
+  getDocuments: () => openDocuments.map(path => ({ path, text: draftDocuments.get(path) ?? "" })),
+  modelFor: path => editorModels.get(path),
+  navigate: async (path, position) => {
+    await openDocument(path, true, position.line + 1);
+    if (activeDocument === path) { codeEditor.setPosition({ lineNumber: position.line + 1, column: position.character + 1 }); codeEditor.revealPositionInCenter(codeEditor.getPosition()); }
+  },
+  review: openRustPermissionReview,
+});
+terminalView = createTerminalView(terminalOutput, invoke, listen);
 initializeCodeEditor();
 bindWindowControls();
 bindPanelResizers();
-void bindTerminalOutput();
 void bindTaskOutput();
 void bindProcessAudit();
 
@@ -3193,8 +3637,7 @@ async function initializeWorkspace() {
   renderTrustedPluginCatalog();
   if (hasProject) {
     await Promise.all([loadWorkspaceTree(), loadGitStatus()]);
-    const firstFile = workspaceEntries.find((entry) => entry.kind === "file");
-    if (firstFile) await openDocument(firstFile.path, false);
+    await restoreEditorSession();
   }
   appShell.dataset.chatOpen = "false";
   if (hasAiProvider) {
@@ -3203,5 +3646,9 @@ async function initializeWorkspace() {
   }
   if (hasProject && !terminal.hidden) void startTerminal();
 }
+
+diffScope.addEventListener("change", renderGitDiffFiles);
+gitReviewDialog.addEventListener("cancel", (event) => { event.preventDefault(); cancelGitReview(); });
+window.addEventListener("focus", () => { if (currentProject) void loadGitStatus(); });
 
 void initializeWorkspace();

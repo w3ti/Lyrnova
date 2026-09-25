@@ -73,10 +73,20 @@ O protótipo é navegável e oferece:
 - Monaco Editor com arquivos reais, syntax highlighting por extensão,
   autocomplete, abas, minimap, gutter, cursor e `Ctrl+S` protegido por revisão;
 - Explorer com ícones por tipo e área Git inspirada na organização do VS Code;
+- ícones da barra de atividades esquerda em 1,5 rem (24 px por padrão), com
+  botões de 48 px, ou 42 px na densidade compacta;
 - foco rápido do chat/editor por botões ou `Ctrl+1`/`Ctrl+2`;
 - breakpoints e live regions.
 
 No shell Tauri de debug, explorer e editor leem e salvam arquivos UTF-8
 existentes dentro da raiz autorizada. No navegador estático, fixtures em memória
-mantêm o protótipo navegável. O agente e o terminal ainda não executam comandos
-ou alterações reais.
+mantêm o protótipo navegável. No aplicativo desktop, o terminal executa comandos
+reais em um PTY Linux com `/bin/bash -i` e xterm.js: ANSI, Unicode, resize,
+Ctrl+C e Ctrl+D. A fonte do terminal continua configurável. O botão `+` reinicia
+a sessão atual; ocultar o painel preserva o shell. Tasks de plugins passam pelo broker de processos e por revisão
+explícita. O agente é opcional e só fica disponível com um provider autorizado.
+
+A barra do editor diferencia salvamento do arquivo e backup da sessão. Rascunhos
+recuperados com divergência no disco mostram um aviso junto ao documento, com ações
+para salvar uma cópia ou descartar explicitamente e reler. A recuperação preserva
+ordem das abas, arquivo ativo, cursor e rolagem; não reexecuta comandos do terminal.

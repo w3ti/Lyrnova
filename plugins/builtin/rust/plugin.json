@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "io.github.w3ti.lyrnova.language.rust",
   "name": "Rust",
-  "description": "Suporte oficial a projetos Rust e Cargo.",
-  "version": "0.1.0",
+  "description": "Suporte a Rust com diagnósticos locais do rust-analyzer em arquivos abertos.",
+  "version": "0.1.1",
   "publisher": "w3ti",
   "license": "GPL-3.0-only",
   "kind": "language",
@@ -23,9 +23,12 @@
     "syntax_highlighting",
     "autocomplete",
     "snippets",
-    "templates"
+    "templates",
+    "lsp",
+    "diagnostics"
   ],
   "permissions": [
-    "workspace_read"
+    "workspace_read",
+    "process_spawn"
   ]
 }

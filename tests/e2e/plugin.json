@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.w3ti.lyrnova.tool.e2e",
+  "name": "E2E fixture",
+  "description": "Local deterministic fixture; never published or downloaded.",
+  "version": "0.1.0",
+  "publisher": "w3ti",
+  "license": "GPL-3.0-only",
+  "kind": "tool",
+  "compatibility": { "lyrnova": ">=0.1.0, <0.2.0", "pluginApi": 1 },
+  "runtime": { "type": "process", "entrypoint": "runtime.py", "protocolVersion": 1 },
+  "source": { "type": "github_release", "repository": "https://github.com/w3ti/Lyrnova", "asset": "e2e-plugin.tar.zst" },
+  "capabilities": ["tasks"],
+  "permissions": ["workspace_read", "workspace_write", "process_spawn"]
+}

@@ -1,7 +1,9 @@
 pub mod ai_provider;
 pub mod app_server;
 pub mod backend;
+pub mod editor_session;
 pub mod git;
+pub mod language;
 pub mod plugin_catalog;
 pub mod plugin_manifest;
 pub mod plugin_package;
@@ -22,7 +24,8 @@ use std::sync::{
 use std::{fs, process::Command};
 
 use ai_provider::{current_ai_provider, resolve_ai_provider};
-use git::{GitError, GitService, GitStatusSummary};
+use git::{GitCommitReview, GitDiff, GitDiffScope, GitError, GitService, GitStatusSummary};
+use language::{LanguageDocument, LanguageError, LanguageService, LanguageSnapshot};
 use plugin_catalog::{
     PluginCatalogError, PluginCatalogService, TrustedPluginSummary, download_release,
 };
@@ -39,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use tasks::{TaskBroker, TaskError, TaskList, TaskReview};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
-use terminal::{TerminalError, TerminalService};
+use terminal::{TerminalError, TerminalService, TerminalSummary};
 use workspace::{
     ApplyDocumentPatchRequest, CreateDocumentRequest, DeleteWorkspaceEntryRequest,
     DeletedWorkspaceEntry, DocumentPatchPreview, DocumentRangeSnapshot, DocumentSnapshot,
@@ -305,6 +308,10 @@ fn project_open_dialog(
         .tasks
         .invalidate_all()
         .map_err(|_| WorkspaceError::Io)?;
+    let mut current_project = state.0.write().map_err(|_| WorkspaceError::Io)?;
+    app.state::<LanguageService>()
+        .stop()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -313,7 +320,8 @@ fn project_open_dialog(
     app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
-    *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
+    *current_project = Some(project);
+    drop(current_project);
     start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
@@ -404,6 +412,10 @@ fn project_create_dialog(
         .tasks
         .invalidate_all()
         .map_err(|_| WorkspaceError::Io)?;
+    let mut current_project = state.0.write().map_err(|_| WorkspaceError::Io)?;
+    app.state::<LanguageService>()
+        .stop()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -412,7 +424,8 @@ fn project_create_dialog(
     app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
     remember_project(&app, project.workspace.root());
-    *state.0.write().map_err(|_| WorkspaceError::Io)? = Some(project);
+    *current_project = Some(project);
+    drop(current_project);
     start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
@@ -425,6 +438,151 @@ fn workspace_list(
         .ok_or(WorkspaceError::NoWorkspace)?
         .workspace
         .list()
+}
+
+fn editor_session_store(
+    app: &tauri::AppHandle,
+) -> Result<editor_session::SessionStore, editor_session::SessionError> {
+    Ok(editor_session::SessionStore::new(
+        app.path()
+            .app_data_dir()
+            .map_err(|_| editor_session::SessionError::Unavailable)?
+            .join("editor-sessions-v1"),
+    ))
+}
+
+#[tauri::command]
+async fn editor_session_load(
+    app: tauri::AppHandle,
+    workspace: String,
+) -> Result<editor_session::LoadedSession, editor_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        let project = state
+            .0
+            .read()
+            .map_err(|_| editor_session::SessionError::Unavailable)?;
+        let project = project
+            .as_ref()
+            .ok_or(editor_session::SessionError::WorkspaceChanged)?;
+        if project.workspace.root().to_string_lossy() != workspace {
+            return Err(editor_session::SessionError::WorkspaceChanged);
+        }
+        editor_session_store(&app)?.load(project.workspace.root())
+    })
+    .await
+    .map_err(|_| editor_session::SessionError::Unavailable)?
+}
+
+#[tauri::command]
+async fn editor_session_save(
+    app: tauri::AppHandle,
+    workspace: String,
+    token: String,
+    session: editor_session::EditorSession,
+) -> Result<String, editor_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        let project = state
+            .0
+            .read()
+            .map_err(|_| editor_session::SessionError::Unavailable)?;
+        let project = project
+            .as_ref()
+            .ok_or(editor_session::SessionError::WorkspaceChanged)?;
+        if project.workspace.root().to_string_lossy() != workspace {
+            return Err(editor_session::SessionError::WorkspaceChanged);
+        }
+        editor_session_store(&app)?.save(project.workspace.root(), &token, &session)
+    })
+    .await
+    .map_err(|_| editor_session::SessionError::Unavailable)?
+}
+
+#[tauri::command]
+async fn language_start(
+    app: tauri::AppHandle,
+    workspace: String,
+    restart: bool,
+) -> Result<LanguageSnapshot, LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        if project.workspace.root().to_string_lossy() != workspace {
+            return Err(LanguageError::WorkspaceChanged);
+        }
+        app.state::<LanguageService>()
+            .start(project.workspace.root(), restart)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
+}
+
+#[tauri::command]
+async fn language_sync(
+    app: tauri::AppHandle,
+    session_id: String,
+    documents: Vec<LanguageDocument>,
+) -> Result<(), LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        app.state::<LanguageService>()
+            .sync(project.workspace.root(), &session_id, documents)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
+}
+
+#[tauri::command]
+async fn language_status(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<LanguageSnapshot, LanguageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plugins = app.state::<PluginLifecycleState>();
+        let _mutation = plugins
+            .mutation
+            .lock()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        app.state::<PluginRegistry>()
+            .authorize_rust_diagnostics()
+            .map_err(|_| LanguageError::PermissionDenied)?;
+        let project = app.state::<ProjectState>();
+        let project = project
+            .0
+            .read()
+            .map_err(|_| LanguageError::StateUnavailable)?;
+        let project = project.as_ref().ok_or(LanguageError::NoWorkspace)?;
+        app.state::<LanguageService>()
+            .snapshot(project.workspace.root(), &session_id)
+    })
+    .await
+    .map_err(|_| LanguageError::StateUnavailable)?
 }
 
 #[tauri::command]
@@ -610,44 +768,67 @@ fn workspace_restore(
 }
 
 #[tauri::command]
-fn git_status(state: tauri::State<'_, ProjectState>) -> Result<GitStatusSummary, GitError> {
-    project_snapshot(&state)
-        .and_then(|project| project.git)
-        .ok_or(GitError::NoWorkspace)?
-        .status()
+async fn git_status(app: tauri::AppHandle) -> Result<GitStatusSummary, GitError> {
+    with_git(app, GitService::status).await
 }
 
 #[tauri::command]
-fn git_stage(
+async fn git_stage(path: String, app: tauri::AppHandle) -> Result<GitStatusSummary, GitError> {
+    with_git(app, move |git| git.stage(&path)).await
+}
+
+#[tauri::command]
+async fn git_unstage(path: String, app: tauri::AppHandle) -> Result<GitStatusSummary, GitError> {
+    with_git(app, move |git| git.unstage(&path)).await
+}
+
+async fn with_git<T: Send + 'static>(
+    app: tauri::AppHandle,
+    operation: impl FnOnce(&GitService) -> Result<T, GitError> + Send + 'static,
+) -> Result<T, GitError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        // Keep workspace replacement out of a read/review/commit already in progress.
+        let project = state.0.read().map_err(|_| GitError::CommandFailed)?;
+        let git = project
+            .as_ref()
+            .and_then(|project| project.git.as_ref())
+            .ok_or(GitError::NoWorkspace)?;
+        operation(git)
+    })
+    .await
+    .map_err(|_| GitError::CommandFailed)?
+}
+
+#[tauri::command]
+async fn git_diff(
     path: String,
-    state: tauri::State<'_, ProjectState>,
-) -> Result<GitStatusSummary, GitError> {
-    project_snapshot(&state)
-        .and_then(|project| project.git)
-        .ok_or(GitError::NoWorkspace)?
-        .stage(&path)
+    scope: GitDiffScope,
+    app: tauri::AppHandle,
+) -> Result<GitDiff, GitError> {
+    with_git(app, move |git| git.diff(&path, scope)).await
 }
 
 #[tauri::command]
-fn git_unstage(
-    path: String,
-    state: tauri::State<'_, ProjectState>,
-) -> Result<GitStatusSummary, GitError> {
-    project_snapshot(&state)
-        .and_then(|project| project.git)
-        .ok_or(GitError::NoWorkspace)?
-        .unstage(&path)
-}
-
-#[tauri::command]
-fn git_commit(
+async fn git_commit_review(
     message: String,
-    state: tauri::State<'_, ProjectState>,
-) -> Result<GitStatusSummary, GitError> {
-    project_snapshot(&state)
-        .and_then(|project| project.git)
-        .ok_or(GitError::NoWorkspace)?
-        .commit(&message)
+    app: tauri::AppHandle,
+) -> Result<GitCommitReview, GitError> {
+    with_git(app, move |git| git.review_commit(&message)).await
+}
+
+#[tauri::command]
+async fn git_commit_review_discard(token: String, app: tauri::AppHandle) -> Result<(), GitError> {
+    with_git(app, move |git| {
+        git.discard_commit_review(&token);
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn git_commit(token: String, app: tauri::AppHandle) -> Result<String, GitError> {
+    with_git(app, move |git| git.commit(&token)).await
 }
 
 #[tauri::command]
@@ -669,8 +850,18 @@ fn plugin_install(
     plugin_id: String,
     approved_permissions: Vec<PluginPermission>,
     app: tauri::AppHandle,
+    plugins: tauri::State<'_, PluginLifecycleState>,
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Result<Vec<PluginSummary>, PluginError> {
+    let _mutation = plugins
+        .mutation
+        .lock()
+        .map_err(|_| PluginError::StateUnavailable)?;
+    if plugin_id == language::RUST_PLUGIN_ID {
+        app.state::<LanguageService>()
+            .stop()
+            .map_err(|_| PluginError::RuntimeStopFailed)?;
+    }
     registry.install(&app, &plugin_id, &approved_permissions)
 }
 
@@ -693,6 +884,11 @@ fn plugin_uninstall(
         .runtimes
         .stop(&plugin_id)
         .map_err(map_runtime_error)?;
+    if plugin_id == language::RUST_PLUGIN_ID {
+        app.state::<LanguageService>()
+            .stop()
+            .map_err(|_| PluginError::RuntimeStopFailed)?;
+    }
     registry.uninstall(&app, &plugin_id)
 }
 
@@ -710,6 +906,11 @@ fn plugin_set_enabled(
         .lock()
         .map_err(|_| PluginError::StateUnavailable)?;
     if !enabled {
+        if plugin_id == language::RUST_PLUGIN_ID {
+            app.state::<LanguageService>()
+                .stop()
+                .map_err(|_| PluginError::RuntimeStopFailed)?;
+        }
         plugins
             .tasks
             .invalidate_plugin(&plugin_id)
@@ -836,6 +1037,9 @@ async fn plugin_catalog_update(
         .tasks
         .invalidate_all()
         .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
+    app.state::<LanguageService>()
+        .stop()
+        .map_err(|_| PluginError::RuntimeStopFailed)?;
     let stop_result = plugins.runtimes.stop_all().map_err(map_runtime_error);
     registry.reload(&app)?;
     stop_result?;
@@ -1051,29 +1255,58 @@ fn plugin_package_cancel(
 }
 
 #[tauri::command]
-fn terminal_start(
+async fn terminal_start(
+    cols: u16,
+    rows: u16,
     window: tauri::WebviewWindow,
-    project: tauri::State<'_, ProjectState>,
-    terminal: tauri::State<'_, TerminalService>,
-) -> Result<(), TerminalError> {
-    let project = project_snapshot(&project).ok_or(TerminalError::ProcessFailed)?;
-    match terminal.start(project.workspace.root(), window) {
-        Err(TerminalError::AlreadyRunning) | Ok(()) => Ok(()),
-        Err(error) => Err(error),
-    }
+) -> Result<TerminalSummary, TerminalError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = window.app_handle().clone();
+        let project = app.state::<ProjectState>();
+        let project = project.0.read().map_err(|_| TerminalError::ProcessFailed)?;
+        let project = project.as_ref().ok_or(TerminalError::ProcessFailed)?;
+        app.state::<TerminalService>()
+            .start(project.workspace.root(), cols, rows, window)
+    })
+    .await
+    .map_err(|_| TerminalError::ProcessFailed)?
 }
 
 #[tauri::command]
 fn terminal_write(
-    input: String,
+    session_id: String,
+    input: Vec<u8>,
     terminal: tauri::State<'_, TerminalService>,
 ) -> Result<(), TerminalError> {
-    terminal.write_line(&input)
+    terminal.write(&session_id, &input)
 }
 
 #[tauri::command]
-fn terminal_stop(terminal: tauri::State<'_, TerminalService>) -> Result<(), TerminalError> {
-    terminal.stop()
+fn terminal_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    terminal: tauri::State<'_, TerminalService>,
+) -> Result<(), TerminalError> {
+    terminal.resize(&session_id, cols, rows)
+}
+
+#[tauri::command]
+fn terminal_ack(
+    session_id: String,
+    sequence: u64,
+    terminal: tauri::State<'_, TerminalService>,
+) -> Result<(), TerminalError> {
+    terminal.ack(&session_id, sequence)
+}
+
+#[tauri::command]
+async fn terminal_stop(session_id: String, app: tauri::AppHandle) -> Result<(), TerminalError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<TerminalService>().stop_session(&session_id)
+    })
+    .await
+    .map_err(|_| TerminalError::ProcessFailed)?
 }
 
 #[tauri::command]
@@ -1352,7 +1585,14 @@ pub fn run() {
         .manage(catalog_service)
         .manage(PluginLifecycleState::default())
         .manage(TerminalService::new())
+        .manage(LanguageService::default())
         .manage(WorkspaceRecoveryService::default())
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                let _ = window.state::<TerminalService>().stop();
+                let _ = window.state::<LanguageService>().stop();
+            }
+        })
         .setup(|app| {
             if let Ok(root) = workspace_recovery_root(app.handle()) {
                 let _ = WorkspaceRecoveryService::cleanup_stale(&root);
@@ -1389,6 +1629,11 @@ pub fn run() {
             project_create_dialog,
             workspace_list,
             workspace_read,
+            language_start,
+            language_sync,
+            language_status,
+            editor_session_load,
+            editor_session_save,
             workspace_read_range,
             workspace_metadata,
             workspace_search,
@@ -1404,6 +1649,9 @@ pub fn run() {
             git_stage,
             git_unstage,
             git_commit,
+            git_diff,
+            git_commit_review,
+            git_commit_review_discard,
             plugin_list,
             ai_provider_current,
             plugin_install,
@@ -1418,6 +1666,8 @@ pub fn run() {
             plugin_package_cancel,
             terminal_start,
             terminal_write,
+            terminal_resize,
+            terminal_ack,
             terminal_stop,
             task_list,
             task_review,

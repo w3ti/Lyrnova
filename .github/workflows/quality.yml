@@ -26,7 +26,10 @@ jobs:
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            webkit2gtk-driver \
+            xvfb \
+            dbus-x11
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -58,5 +61,33 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Enable Bubblewrap in the ephemeral CI runner
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Tests
         run: cargo test --workspace --locked
+
+      - name: Install native test driver
+        run: cargo install tauri-driver --version 2.0.5 --locked
+
+      - name: Build native test application and fixture
+        run: cargo build -p lyrnova --bin lyrnova --example e2e_fixture --locked
+
+      - name: Prepare pinned standalone rust-analyzer
+        run: |
+          curl -fL --retry 3 https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-21/rust-analyzer-x86_64-unknown-linux-gnu.gz -o "$RUNNER_TEMP/rust-analyzer.gz"
+          echo "b2d24ce2bda2ea05b1ad7c2917d205f8111775f703ccd908e6061803ae8257d0  $RUNNER_TEMP/rust-analyzer.gz" | sha256sum --check
+          gzip -dc "$RUNNER_TEMP/rust-analyzer.gz" > "$RUNNER_TEMP/rust-analyzer"
+          chmod 700 "$RUNNER_TEMP/rust-analyzer"
+
+      - name: Native MVP journey without AI
+        run: xvfb-run -a dbus-run-session -- python3 tests/e2e/native.py --rust-analyzer "$RUNNER_TEMP/rust-analyzer"
+
+      - name: Upload native test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-e2e
+          path: target/e2e/
+          if-no-files-found: ignore
+          retention-days: 14

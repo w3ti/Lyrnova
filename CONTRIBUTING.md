@@ -30,6 +30,27 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Para validar o fluxo visual de diff e revisão de commit no Linux, execute após
+o build do frontend, em uma sessão gráfica com PyGObject e WebKitGTK 4.1:
+
+```bash
+python3 ui/tests/git-review-smoke.py
+```
+
+Esse smoke abre uma janela temporária, usa IPC sintético e não modifica
+repositórios do usuário. Os testes Rust de Git usam repositórios em diretórios
+temporários para validar os efeitos reais de revisão e commit.
+
+A [jornada nativa do MVP](tests/e2e/README.md) usa o binário Tauri real,
+WebKitWebDriver e um perfil temporário. Ela valida edição, busca, Git, terminal,
+Tasks, falha de plugin e reinício sem IA; o workflow guarda seu relatório e
+artefatos de falha. Com `--rust-analyzer /caminho/do/binario`, a suíte também
+exercita o servidor Rust real; o CI prepara uma release standalone com checksum
+fixado. Consulte o guia para dependências e limites de cobertura.
+
+O [guia de diagnósticos Rust](docs/plugins/rust-diagnostics.md) descreve a ativação
+com revisão de permissões e as limitações desta primeira integração LSP.
+
 ## Regras de segurança
 
 - não configure origens ou recursos remotos no frontend;

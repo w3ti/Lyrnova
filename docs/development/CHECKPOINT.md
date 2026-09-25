@@ -1,5 +1,94 @@
 # Checkpoint de desenvolvimento
 
+## Atualização local — 2026-09-25
+
+O HEAD publicado é `c338103` e já contém o item #16. A descrição histórica abaixo
+foi preservada, mas sua indicação de #16 sem commit está superada.
+
+Primeira entrega após o levantamento do produto, ainda local:
+
+- inspector com diff real de worktree/índice, seleção de removidos e renames;
+- revisão integral antes de commit, token efêmero e árvore Git imutável;
+- rejeição de revisão alterada, expirada, cancelada ou reutilizada;
+- operações Git fora da thread da UI, limites de captura/tempo e paths literais;
+- testes em repositórios temporários e smoke de UI no WebKitGTK;
+- contrato e limites na ADR-0018.
+
+Validação: build frontend/Rust, fmt, clippy sem warnings, 166 testes aprovados e
+um teste opcional de provider ignorado; smoke da revisão no WebKitGTK aprovado.
+O aplicativo foi iniciado na sessão gráfica.
+
+Segunda entrega local: jornada nativa do MVP sem IA (#17), com o binário real,
+perfil temporário, Git real e plugin externo de teste. Passaram edição/salvamento,
+busca, revisão/commit, streaming, cancelamento de Tasks, falha de plugin, conflito
+de salvamento, reinício sem repetir comandos e fechamento da janela. Editor e
+base da interface usam 16 px por padrão, preservando preferências já salvas.
+
+A jornada encontrou e corrigiu a ausência de permissões de escuta de eventos e
+o vazamento de comandos filhos ao reiniciar/fechar o terminal. Emissão de eventos
+pelo frontend permanece negada e é verificada no aplicativo real.
+
+Validação da segunda entrega: 167 testes Rust aprovados, um teste opcional de provider ignorado,
+fmt/clippy aprovados e 10 grupos de verificações nativas aprovados. O CI foi
+ampliado, mas ainda não executado remotamente. Evidência e decisão de homologação
+em [MVP nativo](../product/mvp-validation-2026-09-25.md); instruções e limites em
+[tests/e2e](../../tests/e2e/README.md). A homologação manual de entrada e diálogos
+continua pendente.
+
+Terceira entrega local: terminal PTY Linux com Bash interativo e xterm.js,
+ANSI/Unicode, resize, Ctrl+C/Ctrl+D, scrollback limitado e backpressure. Escrita,
+resize, ACK e encerramento usam identificação de sessão; mensagens antigas não
+atingem o terminal novo. O fechamento limpa grupos de jobs interativos, inclusive
+background/disown na mesma sessão. Start/stop usam o pool bloqueante do Tauri.
+Há uma sessão efêmera por workspace ativo, substituída ao reiniciar/trocar projeto.
+Perfis, múltiplos terminais e plataformas não Linux continuam pendentes.
+
+Contrato na [ADR-0019](../architecture/ADR-0019-linux-pty-terminal.md). A suíte Rust
+agora tem 171 testes aprovados; os 12 grupos da jornada nativa passaram, incluindo
+ANSI, resize, colagem, Ctrl+C/Ctrl+D, EOF, reinício sob saída contínua e rejeição
+de sessões obsoletas. O smoke de revisão Git também passou (15 verificações).
+Quarta entrega local: recuperação de sessão por projeto, com abas ordenadas,
+documento ativo, cursor/rolagem e rascunhos. Snapshots privados, atômicos e limitados
+preservam revisões antigas; arquivos alterados/excluídos exigem cópia ou descarte
+explícito antes de reler. Há flush ao fechar/trocar projeto, erro visível de backup,
+recusa de snapshot obsoleto e preservação de corrupção/schema desconhecido. O app
+nativo também deixa de carregar as abas de demonstração. Contrato e limites na
+[ADR-0020](../architecture/ADR-0020-editor-session-recovery.md).
+
+Validação da quarta entrega: 176 testes Rust aprovados (164 unitários + 12 de
+fronteira), um teste opcional de provider ignorado, fmt/clippy e build aprovados.
+Os 16 grupos da jornada nativa passaram, incluindo abas/cursor/rolagem, arquivos
+alterados/excluídos, cópia, descarte, flush no fechamento, sessão vazia e schema
+incompatível preservado. Evidência local em `target/e2e-session/report.json`.
+Entrada e prompts seguem pelo harness DOM; seletores nativos/troca de projeto
+exigem homologação manual. A repetição do smoke visual Git nesta fase ficou
+pendente: a sessão do host estava bloqueada (`LockedHint=yes`) e o WebView GTK
+não recebeu nenhum frame de animação. O fluxo Git passou na jornada nativa.
+O binário atualizado foi iniciado, preservando a janela anterior. Nenhuma
+alteração foi publicada.
+
+Quinta entrega local: diagnósticos LSP iniciais de Rust nos documentos abertos,
+com marcadores no Monaco e painel Problemas navegável. A ativação exige revisão
+das permissões do plugin e um rust-analyzer standalone no PATH. O servidor roda
+isolado, sem rede e com workspace somente leitura; build scripts e proc macros
+ficam desabilitados. Versões e sessões impedem diagnósticos obsoletos; falhas
+permitem reinício e desativar o plugin encerra o processo. Dependências externas,
+biblioteca padrão e demais recursos de linguagem ainda não estão integrados.
+Contrato na [ADR-0021](../architecture/ADR-0021-rust-lsp-diagnostics.md) e uso no
+[guia Rust](../plugins/rust-diagnostics.md).
+
+Validação: 186 testes Rust aprovados (174 unitários + 12 de fronteira), um teste
+opcional ignorado, clippy sem warnings e 20 grupos da jornada nativa aprovados
+com rust-analyzer real, incluindo crash/reinício e revogação de permissões.
+Evidência local: `target/e2e-lsp/report.json`. CI remoto e homologação manual
+continuam pendentes. Os ícones da barra esquerda passam a 24 px no tamanho
+padrão da interface, com botões de 48 px (42 px na densidade compacta).
+
+O próximo trabalho funcional é ampliar a ponte Rust com navegação para definição
+e hover, além de tratar a integração das toolchains e dependências explicitamente.
+
+## Registro histórico de 2026-09-02
+
 Data: 2026-09-02
 Commit-base: `5ceddb8`
 Estado: item #15 publicado; item #16 em implementação local.

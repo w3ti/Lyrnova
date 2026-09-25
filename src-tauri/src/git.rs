@@ -1,13 +1,16 @@
 use std::{
     path::{Component, Path},
-    process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
 
+#[path = "git_review.rs"]
+mod review;
+pub use review::{GitCommitReview, GitDiff, GitDiffScope};
+
 const MAX_STATUS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHANGES: usize = 10_000;
-const MAX_COMMIT_MESSAGE_BYTES: usize = 16 * 1024;
 const STATUS_ARGS: &[&str] = &[
     "--no-optional-locks",
     "-c",
@@ -24,6 +27,7 @@ const STATUS_ARGS: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct GitService {
     root: std::path::PathBuf,
+    pending_commit: Arc<Mutex<Option<review::PendingCommit>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,6 +75,12 @@ pub enum GitError {
     InvalidMessage,
     ChangeNotFound,
     CommandFailed,
+    DiffTooLarge,
+    TimedOut,
+    NonTextDiff,
+    ReviewExpired,
+    ReviewChanged,
+    OperationInProgress,
 }
 
 impl GitService {
@@ -82,22 +92,19 @@ impl GitService {
         if !root.join(".git").exists() {
             return Err(GitError::NotARepository);
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            pending_commit: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn status(&self) -> Result<GitStatusSummary, GitError> {
-        let output = Command::new("git")
-            .args(STATUS_ARGS)
-            .current_dir(&self.root)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("LC_ALL", "C")
-            .output()
-            .map_err(|_| GitError::GitUnavailable)?;
+        let output = self.git_output(STATUS_ARGS, MAX_STATUS_BYTES)?;
 
         if !output.status.success() {
             return Err(GitError::NotARepository);
         }
-        if output.stdout.len() > MAX_STATUS_BYTES {
+        if output.truncated {
             return Err(GitError::TooManyChanges);
         }
         parse_status(&output.stdout)
@@ -113,66 +120,34 @@ impl GitService {
         {
             return Err(GitError::ChangeNotFound);
         }
-        self.run_mutation(["add", "--", path])?;
+        self.run_mutation(&["add", "--", path])?;
         self.status()
     }
 
     pub fn unstage(&self, path: &str) -> Result<GitStatusSummary, GitError> {
         let path = validate_repo_path(path)?;
         let status = self.status()?;
-        if !status
+        let change = status
             .changes
             .iter()
-            .any(|change| change.path == path && change.index.is_some())
-        {
-            return Err(GitError::ChangeNotFound);
-        }
-        if status.commit.is_some() {
-            self.run_mutation(["restore", "--staged", "--", path])?;
+            .find(|change| change.path == path && change.index.is_some())
+            .ok_or(GitError::ChangeNotFound)?;
+        let mut args = if status.commit.is_some() {
+            vec!["restore", "--staged", "--", path]
         } else {
-            self.run_mutation(["rm", "--cached", "--", path])?;
+            vec!["rm", "--cached", "--", path]
+        };
+        if let Some(previous) = &change.previous_path {
+            validate_repo_path(previous)?;
+            args.push(previous);
         }
+        self.run_mutation(&args)?;
         self.status()
     }
 
-    pub fn commit(&self, message: &str) -> Result<GitStatusSummary, GitError> {
-        let message = message.trim();
-        if message.is_empty() || message.len() > MAX_COMMIT_MESSAGE_BYTES || message.contains('\0')
-        {
-            return Err(GitError::InvalidMessage);
-        }
-        if !self
-            .status()?
-            .changes
-            .iter()
-            .any(|change| change.index.is_some())
-        {
-            return Err(GitError::ChangeNotFound);
-        }
-        self.run_mutation([
-            "commit",
-            "--no-verify",
-            "--no-gpg-sign",
-            "--message",
-            message,
-        ])?;
-        self.status()
-    }
-
-    fn run_mutation<const N: usize>(&self, args: [&str; N]) -> Result<(), GitError> {
-        let status = Command::new("git")
-            .arg("--no-optional-locks")
-            .args(["-c", "core.hooksPath=/dev/null"])
-            .args(args)
-            .current_dir(&self.root)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|_| GitError::GitUnavailable)?;
-        if status.success() {
+    fn run_mutation(&self, args: &[&str]) -> Result<(), GitError> {
+        let output = self.git_output(args, 4096)?;
+        if output.status.success() {
             Ok(())
         } else {
             Err(GitError::CommandFailed)
@@ -339,6 +314,7 @@ fn parse_kind(value: char) -> Result<Option<ChangeKind>, GitError> {
 mod tests {
     use std::{
         fs,
+        process::Command,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -449,7 +425,9 @@ mod tests {
                     .success()
             );
         }
-        let committed = service.commit("Primeiro commit").unwrap();
+        let review = service.review_commit("Primeiro commit").unwrap();
+        service.commit(&review.token).unwrap();
+        let committed = service.status().unwrap();
         assert!(committed.changes.is_empty());
         assert!(committed.commit.is_some());
 

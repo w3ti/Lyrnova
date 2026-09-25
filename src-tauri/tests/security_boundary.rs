@@ -45,7 +45,7 @@ fn capabilities_target_only_local_windows() {
 }
 
 #[test]
-fn frontend_window_controls_have_an_explicit_allowlist() {
+fn frontend_window_controls_and_event_listeners_have_an_explicit_allowlist() {
     let capability = read_json("capabilities/main.json");
     let permissions = capability["permissions"]
         .as_array()
@@ -55,7 +55,11 @@ fn frontend_window_controls_have_an_explicit_allowlist() {
     assert_eq!(
         actual,
         [
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
             "core:window:allow-close",
+            "core:window:allow-destroy",
+            "core:window:allow-is-maximized",
             "core:window:allow-maximize",
             "core:window:allow-minimize",
             "core:window:allow-start-dragging",

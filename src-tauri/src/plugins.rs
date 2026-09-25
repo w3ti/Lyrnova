@@ -127,13 +127,29 @@ impl PluginPreferences {
             .map(|plugin| {
                 (
                     plugin.id.clone(),
-                    plugin.permissions.iter().copied().collect(),
+                    plugin
+                        .permissions
+                        .iter()
+                        .copied()
+                        .filter(|p| *p == PluginPermission::WorkspaceRead)
+                        .collect(),
                 )
             })
             .collect();
+        let enabled = catalog
+            .iter()
+            .filter(|p| {
+                installed.contains_key(&p.manifest.id)
+                    && p.manifest
+                        .permissions
+                        .iter()
+                        .all(|permission| *permission == PluginPermission::WorkspaceRead)
+            })
+            .map(|p| p.manifest.id.clone())
+            .collect();
         Self {
             version: PLUGIN_STATE_VERSION,
-            enabled: installed.keys().cloned().collect(),
+            enabled,
             installed,
             grants,
         }
@@ -401,6 +417,36 @@ impl PluginRegistry {
                 .grants
                 .get(id)
                 .is_some_and(|grants| grants.contains(&permission))
+        {
+            return Err(PluginError::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    pub fn authorize_rust_diagnostics(&self) -> Result<(), PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        let id = crate::language::RUST_PLUGIN_ID;
+        let plugin = catalog_plugin(&state.catalog, id)?;
+        if !plugin.manifest.source.is_bundled()
+            || !matches!(&plugin.manifest.runtime, PluginRuntime::Builtin { module } if module == "language.rust")
+            || ![PluginCapability::Lsp, PluginCapability::Diagnostics]
+                .iter()
+                .all(|c| plugin.manifest.capabilities.contains(c))
+            || state.preferences.installed.get(id) != Some(&plugin.manifest.version)
+            || !state.preferences.enabled.contains(id)
+            || !permissions_exactly_match(
+                &plugin.manifest.permissions,
+                state
+                    .preferences
+                    .grants
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            )
         {
             return Err(PluginError::PermissionDenied);
         }
@@ -1092,6 +1138,45 @@ mod tests {
     }
 
     #[test]
+    fn rust_server_requires_explicit_process_grant_and_exact_capabilities() {
+        let registry = PluginRegistry::default();
+        let id = crate::language::RUST_PLUGIN_ID;
+        assert!(!registry.is_enabled(id));
+        assert_eq!(
+            registry.authorize_rust_diagnostics(),
+            Err(PluginError::PermissionDenied)
+        );
+        {
+            let mut state = registry.state.write().unwrap();
+            state.preferences.enabled.insert(id.into());
+            state.preferences.grants.insert(
+                id.into(),
+                [
+                    PluginPermission::WorkspaceRead,
+                    PluginPermission::ProcessSpawn,
+                ]
+                .into(),
+            );
+        }
+        assert!(registry.authorize_rust_diagnostics().is_ok());
+        {
+            let mut state = registry.state.write().unwrap();
+            state
+                .catalog
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .unwrap()
+                .manifest
+                .capabilities
+                .retain(|c| *c != PluginCapability::Lsp);
+        }
+        assert_eq!(
+            registry.authorize_rust_diagnostics(),
+            Err(PluginError::PermissionDenied)
+        );
+    }
+
+    #[test]
     fn defaults_install_languages_without_an_ai_provider() {
         let catalog = bundled_entries();
         let preferences = PluginPreferences::defaults(&catalog);
@@ -1546,14 +1631,15 @@ mod tests {
         let migrated = parse_preferences(legacy, &catalog).unwrap();
 
         assert_eq!(migrated.version, PLUGIN_STATE_VERSION);
+        let migrated = normalize_preferences(migrated, &catalog);
         assert_eq!(
             migrated
                 .installed
                 .get("io.github.w3ti.lyrnova.language.rust"),
-            Some(&Version::new(0, 1, 0))
+            Some(&Version::new(0, 1, 1))
         );
         assert!(
-            migrated
+            !migrated
                 .enabled
                 .contains("io.github.w3ti.lyrnova.language.rust")
         );

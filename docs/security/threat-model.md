@@ -1,5 +1,31 @@
 # Threat model inicial do IDE e dos plugins
 
+## Validação nativa e ciclo do terminal — 2026-09-25
+
+A janela local recebe apenas `core:event:allow-listen`/`allow-unlisten` para
+consumir streaming e auditoria; emitir eventos pelo frontend continua sem
+permissão. A consulta do estado maximizado também é concedida ao controle de
+janela existente. Essas permissões não ampliam os grants de plugins.
+
+O terminal Linux usa PTY e uma sessão de processos própria. Reiniciar, trocar
+projeto, descartar a sessão e destruir a janela principal encerram também os
+grupos de jobs foreground/background antes de recolher o shell. Não é sandbox
+nem contenção de processos que deliberadamente usem `setsid`; cgroups e crash
+abrupto continuam fora da garantia. `waitid(WNOWAIT)` reserva o PID do líder até
+a limpeza. Os membros da sessão são sinalizados por pidfds para evitar atingir
+processos alheios por reutilização de PID. Start/stop não bloqueiam a thread de interface.
+
+Entrada, resize, ACK e stop vindos do frontend exigem o identificador da sessão
+atual. Há limites de filas e confirmação após parsing no xterm para que uma
+saída contínua não cresça sem limite. Saída é uma sequência de bytes para o
+emulador, nunca HTML; OSC de clipboard/links e operações de janela são desativados.
+O contrato e limites estão na [ADR-0019](../architecture/ADR-0019-linux-pty-terminal.md).
+
+A [jornada nativa](../../tests/e2e/README.md) exercita esses efeitos reais em um
+perfil temporário, incluindo Tasks sob Bubblewrap, cancelamento de descendentes,
+falha de plugin e conflitos de salvamento. Ela não substitui os testes negativos
+de autoridade nem a homologação de entrada/acessibilidade do sistema operacional.
+
 ## Ativos
 
 - código-fonte, Git e worktrees;
@@ -47,6 +73,9 @@ repositório são tratados como não confiáveis para fins de autoridade.
 | Provider amplia “permitir na sessão” | regra local limitada à conversa + hash exato; provider recebe aceite pontual |
 | Timeout ou janela fechada vira aceite | expiração e lifecycle sempre negam pendências |
 | Patch sobre arquivo alterado | precondition/hash e conflito explícito |
+| Diff executa código do repositório | `--no-ext-diff`, `--no-textconv`, hooks/fsmonitor desativados e argumentos literais |
+| Commit inclui conteúdo não revisado | token efêmero ligado à árvore imutável, mensagem, HEAD e referência; revalidação e atualização condicional |
+| Diff excessivo ou resposta atrasada engana a revisão | captura/tempo limitados, truncamento explícito, revisão incompleta sem token e descarte de respostas antigas |
 | Processo continua após cancelamento | process group/job e cleanup |
 | Processo inunda stdout/stderr | drenagem concorrente e captura limitada por stream |
 | Fork bomb esgota o host | limite de processos; cgroup v2 planejado para quota por Task |
@@ -191,3 +220,47 @@ encontram mais a solicitação consumida. Regras de sessão ficam no núcleo, li
 conversa e ao hash exato, são revogáveis nas Configurações e nunca são delegadas como
 política persistente ao provider. O histórico em memória contém somente categoria,
 decisão, origem, horário e hash, sem comandos, diffs ou valores de environment.
+
+O inspector Git usa diffs reais de worktree e índice. O commit local exige revisar
+o diff completo de uma árvore imutável e confirmar um token de uso único, com
+validade de cinco minutos. Mudanças no índice/HEAD/branch invalidam a revisão.
+O commit publica somente a árvore revisada e não reescreve o índice. Paths são
+literais, plugins de diff/textconv não executam e conteúdo é apresentado como texto.
+A ADR-0018 documenta o contrato, os limites e a corrida residual de checkout.
+
+## Recuperação do editor — 2026-09-25
+
+Rascunhos agora persistem em arquivos privados 0600, sob diretório 0700 por perfil,
+fora do workspace. Isso inclui eventual conteúdo sensível digitado pelo usuário;
+não há criptografia nem proteção contra processos do mesmo usuário/root. O fluxo
+não envia esse conteúdo a plugins, logs ou rede. Tamanho e quantidade são limitados.
+Snapshot corrompido ou de versão desconhecida não é sobrescrito automaticamente.
+
+Escritas usam temporário exclusivo, sincronização, rename e lock/CAS por workspace.
+Os commands só aceitam o projeto atualmente aberto. Recuperar um rascunho preserva
+sua revisão original e não escreve no workspace; disco divergente ou indisponível
+exige salvar uma cópia nova ou descarte explícito antes de reler. O fechamento usa
+`onCloseRequested` e concede `core:window:allow-destroy` ao helper do Tauri para
+concluir depois do flush. Emissão de eventos continua negada. Limites e retenção
+estão na [ADR-0020](../architecture/ADR-0020-editor-session-recovery.md).
+
+## Diagnósticos Rust — 2026-09-25
+
+LSP acrescenta um programa externo com leitura dos rascunhos e do projeto. Rust
+0.1.1 exige revisão da nova permissão `process_spawn`; ela não é concedida na
+migração nem nos defaults. Start/sync/status repetem a autorização e a identidade
+do plugin. A comunicação possui versões e identificador de sessão; diagnósticos
+fora de URI/versão são ignorados e conteúdo do servidor é mostrado como texto.
+Não existe roteamento de comandos LSP ou aplicação de edits ao workspace.
+
+O servidor roda exclusivamente via Bubblewrap, com projeto read-only, rede
+isolada e ambiente/caches privados. Configurações desativam build scripts, proc
+macros e checks; arquivos `rust-analyzer.toml` existentes no código são mascarados
+no mount. Esse mascaramento não cria um snapshot imutável do projeto: a fronteira
+contra execução descoberta por ferramentas é o sandbox, não uma promessa de que
+opções de servidor validam código. URI/ranges, framing, filas e documentos têm
+limites. Desativação, troca de projeto e fechamento encerram o processo. Falhas
+limpam os diagnósticos e permitem reinício, mantendo o editor utilizável.
+
+Escopo, limites e bibliotecas não carregadas estão na
+[ADR-0021](../architecture/ADR-0021-rust-lsp-diagnostics.md).

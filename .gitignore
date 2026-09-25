@@ -9,6 +9,8 @@
 .idea/
 .vscode/
 *.swp
+__pycache__/
+*.pyc
 
 # Packaging outputs
 /dist/
