@@ -27,14 +27,17 @@ pub struct Completion {
     additional: Vec<TextEdit>,
     sort_text: String,
     filter_text: String,
+    pub(super) resolve_id: Option<String>,
+    #[serde(skip)]
+    pub(super) raw: Option<Value>,
 }
 #[derive(Debug, Serialize)]
 pub struct Completions {
-    items: Vec<Completion>,
-    incomplete: bool,
+    pub(super) items: Vec<Completion>,
+    pub(super) incomplete: bool,
 }
 
-// Snapshot closed Rust sources before rename; reject oversized workspaces instead of
+// Snapshot closed Rust sources before workspace edits; reject oversized workspaces instead of
 // accepting edits whose input was never observed. No symlink traversal.
 pub(super) fn baselines(root: &Path) -> Result<BTreeMap<String, String>, LanguageError> {
     let mut files = BTreeMap::new();
@@ -118,6 +121,77 @@ fn edits(text: &str, value: &Value) -> Result<Vec<TextEdit>, LanguageError> {
     }
     Ok(result)
 }
+#[derive(Debug, Serialize)]
+pub struct CodeAction {
+    pub title: String,
+    pub preferred: bool,
+    pub edits: Vec<DocumentEdits>,
+}
+fn workspace_edits(
+    root: &Path,
+    value: &Value,
+    docs: &BTreeMap<String, Arc<LanguageDocument>>,
+) -> Result<Vec<DocumentEdits>, LanguageError> {
+    if value.is_null() {
+        return Ok(vec![]);
+    }
+    if !value.is_object() || value.get("changeAnnotations").is_some() {
+        return Err(LanguageError::UnsupportedFeature);
+    }
+    let mut changes = BTreeMap::new();
+    if let Some(raw) = value.get("changes") {
+        for (uri, edits) in raw.as_object().ok_or(LanguageError::ProtocolViolation)? {
+            changes.insert(query::target_path(uri)?, edits.clone());
+        }
+    }
+    if let Some(raw) = value.get("documentChanges") {
+        if value.get("changes").is_some() {
+            return Err(LanguageError::ProtocolViolation);
+        }
+        for change in raw.as_array().ok_or(LanguageError::ProtocolViolation)? {
+            if change.get("kind").is_some() {
+                return Err(LanguageError::UnsupportedFeature);
+            }
+            let path = query::target_path(
+                change["textDocument"]["uri"]
+                    .as_str()
+                    .ok_or(LanguageError::ProtocolViolation)?,
+            )?;
+            let version = &change["textDocument"]["version"];
+            if !version.is_null()
+                && docs.get(&path).map(|doc| i64::from(doc.version)) != version.as_i64()
+            {
+                return Err(LanguageError::StaleDocument);
+            }
+            if changes.insert(path, change["edits"].clone()).is_some() {
+                return Err(LanguageError::ProtocolViolation);
+            }
+        }
+    }
+    if changes.len() > MAX_DOCUMENTS {
+        return Err(LanguageError::TooLarge);
+    }
+    let mut result = Vec::new();
+    let mut bytes = 0;
+    for (path, raw) in changes {
+        query::checked_path(root, &path)?;
+        let original = match docs.get(&path) {
+            Some(doc) => doc.text.clone(),
+            None => query::read_target(root, &path)?,
+        };
+        let edits = edits(&original, &raw)?;
+        bytes += original.len() + edits.iter().map(|edit| edit.new_text.len()).sum::<usize>();
+        if bytes > MAX_TOTAL {
+            return Err(LanguageError::TooLarge);
+        }
+        result.push(DocumentEdits {
+            path,
+            original,
+            edits,
+        });
+    }
+    Ok(result)
+}
 pub(super) fn parse(
     root: &Path,
     query: &LanguageQuery,
@@ -131,69 +205,57 @@ pub(super) fn parse(
         } else {
             edits(&doc.text, &value)?
         })),
-        QueryKind::Rename => {
-            if value.is_null() {
-                return Ok(QueryResult::Rename(vec![]));
-            }
-            if !value.is_object() || value.get("changeAnnotations").is_some() {
-                return Err(LanguageError::UnsupportedFeature);
-            }
-            let mut changes = BTreeMap::new();
-            if let Some(raw) = value.get("changes") {
-                for (uri, edits) in raw.as_object().ok_or(LanguageError::ProtocolViolation)? {
-                    changes.insert(query::target_path(uri)?, edits.clone());
-                }
-            }
-            if let Some(raw) = value.get("documentChanges") {
-                if value.get("changes").is_some() {
-                    return Err(LanguageError::ProtocolViolation);
-                }
-                for change in raw.as_array().ok_or(LanguageError::ProtocolViolation)? {
-                    if change.get("kind").is_some() {
-                        return Err(LanguageError::UnsupportedFeature);
-                    }
-                    let path = query::target_path(
-                        change["textDocument"]["uri"]
-                            .as_str()
-                            .ok_or(LanguageError::ProtocolViolation)?,
-                    )?;
-                    let version = &change["textDocument"]["version"];
-                    if !version.is_null()
-                        && docs.get(&path).map(|doc| i64::from(doc.version)) != version.as_i64()
-                    {
-                        return Err(LanguageError::StaleDocument);
-                    }
-                    if changes.insert(path, change["edits"].clone()).is_some() {
-                        return Err(LanguageError::ProtocolViolation);
-                    }
-                }
-            }
-            if changes.len() > MAX_DOCUMENTS {
-                return Err(LanguageError::TooLarge);
-            }
-            let mut result = Vec::new();
+        QueryKind::Rename => Ok(QueryResult::Rename(workspace_edits(root, &value, docs)?)),
+        QueryKind::CodeAction => {
+            let mut actions = Vec::new();
             let mut bytes = 0;
-            for (path, raw) in changes {
-                query::checked_path(root, &path)?;
-                let original = match docs.get(&path) {
-                    Some(doc) => doc.text.clone(),
-                    None => query::read_target(root, &path)?,
-                };
-                let edits = edits(&original, &raw)?;
-                bytes +=
-                    original.len() + edits.iter().map(|edit| edit.new_text.len()).sum::<usize>();
-                if bytes > MAX_TOTAL {
-                    return Err(LanguageError::TooLarge);
+            if value.is_null() {
+                return Ok(QueryResult::CodeAction(actions));
+            }
+            for item in value
+                .as_array()
+                .ok_or(LanguageError::ProtocolViolation)?
+                .iter()
+                .take(32)
+            {
+                // Eager literal quick fixes only. Commands, resource operations and
+                // unrecognized/disabled actions never reach the editor.
+                if item.get("command").is_some()
+                    || item.get("disabled").is_some()
+                    || !item["kind"]
+                        .as_str()
+                        .is_some_and(|k| k == "quickfix" || k.starts_with("quickfix."))
+                {
+                    continue;
                 }
-                result.push(DocumentEdits {
-                    path,
-                    original,
+                let Some(edit) = item.get("edit") else {
+                    continue;
+                };
+                let Ok(edits) = workspace_edits(root, edit, docs) else {
+                    continue;
+                };
+                if edits.is_empty() {
+                    continue;
+                }
+                let title = string(&item["title"], 4096)?;
+                bytes += edits
+                    .iter()
+                    .map(|d| {
+                        d.original.len() + d.edits.iter().map(|e| e.new_text.len()).sum::<usize>()
+                    })
+                    .sum::<usize>();
+                if bytes > MAX_TOTAL {
+                    break;
+                }
+                actions.push(CodeAction {
+                    title,
+                    preferred: item["isPreferred"] == true,
                     edits,
                 });
             }
-            Ok(QueryResult::Rename(result))
+            Ok(QueryResult::CodeAction(actions))
         }
-        QueryKind::Completion => {
+        QueryKind::Completion | QueryKind::CompletionResolve => {
             let empty = vec![];
             let entries = if value.is_null() {
                 &empty
@@ -205,8 +267,7 @@ pub(super) fn parse(
             };
             let mut items = Vec::new();
             for item in entries.iter().take(256) {
-                // Completion resolution/commands are intentionally not executable IPC.
-                // Auto-import is disabled in config; eager same-document edits are supported.
+                // Server commands remain outside the closed query protocol.
                 if item.get("command").is_some() {
                     continue;
                 }
@@ -248,6 +309,13 @@ pub(super) fn parse(
                 } else if !additional.is_empty() {
                     continue;
                 }
+                if doc.text.len()
+                    + insert_text.len()
+                    + additional.iter().map(|e| e.new_text.len()).sum::<usize>()
+                    > MAX_DOCUMENT
+                {
+                    return Err(LanguageError::TooLarge);
+                }
                 let sort_text = item
                     .get("sortText")
                     .map(|v| string(v, 4096))
@@ -268,6 +336,8 @@ pub(super) fn parse(
                     snippet: item["insertTextFormat"] == 2,
                     sort_text,
                     filter_text,
+                    resolve_id: None,
+                    raw: item.get("data").map(|_| item.clone()),
                 });
             }
             Ok(QueryResult::Completion(Completions {
@@ -296,6 +366,8 @@ mod tests {
                 character: 5,
             },
             new_name: None,
+            resolve_id: None,
+            end: None,
         }
     }
     fn docs() -> BTreeMap<String, Arc<LanguageDocument>> {
@@ -364,6 +436,39 @@ mod tests {
         assert!(result.items[0].snippet);
         assert!(result.incomplete);
         assert!(parse(Path::new("/tmp"), &request(QueryKind::Completion), json!([{"label":"bad","textEdit":{"range":range(3,9),"newText":"target"},"additionalTextEdits":[{"range":range(3,4),"newText":"overlap"}]}]), &docs()).is_err());
+    }
+    #[test]
+    fn quick_fixes_drop_commands_file_operations_external_and_overlapping_edits() {
+        let edit = json!({"changes":{"file:///workspace/lib.rs":[{"range":range(3,9),"newText":"fixed"}]}});
+        let mut actions =
+            vec![json!({"title":"Fix","kind":"quickfix","edit":edit,"isPreferred":true})];
+        for bad in [
+            json!({"command":{"command":"evil"}}),
+            json!({"disabled":{"reason":"no"}}),
+            json!({"kind":"refactor"}),
+            json!({"edit":{"changes":{"file:///etc/lib.rs":[]}}}),
+            json!({"edit":{"documentChanges":[{"kind":"create","uri":"file:///workspace/new.rs"}]}}),
+            json!({"edit":{"changes":{"file:///workspace/lib.rs":[{"range":range(3,7),"newText":"a"},{"range":range(4,8),"newText":"b"}]}}}),
+        ] {
+            let mut action = actions[0].clone();
+            action
+                .as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
+            actions.push(action);
+        }
+        let QueryResult::CodeAction(result) = parse(
+            Path::new("/tmp"),
+            &request(QueryKind::CodeAction),
+            json!(actions),
+            &docs(),
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(result.len(), 1);
+        assert!(result[0].preferred);
+        assert_eq!(result[0].edits[0].edits[0].new_text, "fixed");
     }
     #[test]
     fn formatting_is_bounded_and_null_means_no_change() {

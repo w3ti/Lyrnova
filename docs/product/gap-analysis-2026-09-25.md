@@ -28,8 +28,11 @@ símbolos em rascunhos e formatação via rustfmt; veja a
 A nona entrega acrescenta acompanhamento de alterações externas no workspace,
 recarga de abas limpas, preservação de conflitos e atualização automática da análise
 Rust; contrato e limites na [ADR-0025](../architecture/ADR-0025-workspace-external-changes.md).
-Downloads, build scripts/proc macros, auto-imports, code actions e depuração continuam
-pendentes; estas etapas não concluem o plugin Rust oficial.
+A décima entrega acrescenta correções rápidas (Ctrl+.) e auto-imports com
+edições validadas em rascunhos e desfazer. Downloads, build scripts/proc macros,
+refatorações gerais, organização de imports e depuração continuam pendentes;
+estas etapas não concluem o plugin Rust oficial. O CI de `af79332` passou
+([execução](https://github.com/w3ti/Lyrnova/actions/runs/36177855431)).
 O restante deste documento preserva o diagnóstico anterior à implementação;
 diff multi-escopo avançado e validação global do MVP continuam pendentes.
 

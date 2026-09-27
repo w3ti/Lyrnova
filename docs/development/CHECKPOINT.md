@@ -2,8 +2,26 @@
 
 ## Atualização local — 2026-09-25
 
-O HEAD publicado é `c338103` e já contém o item #16. A descrição histórica abaixo
-foi preservada, mas sua indicação de #16 sem commit está superada.
+O HEAD publicado é `af79332`, contendo as entregas 1–9 abaixo. O
+[CI remoto](https://github.com/w3ti/Lyrnova/actions/runs/36177855431) concluiu com
+sucesso, incluindo a jornada nativa com rust-analyzer real. As indicações antigas
+de CI pendente/falho e de entregas ainda sem commit estão superadas para esse HEAD.
+A entrega 10, descrita a seguir, permanece local.
+
+Décima entrega: correções rápidas Rust (Ctrl+.) e auto-imports no autocomplete.
+As edições ficam em rascunhos, com validação de versão/conteúdo e desfazer; imports
+são resolvidos antes de oferecer a sugestão para inserir símbolo e `use` juntos.
+Resolução usa IDs opacos limitados à sessão; comandos e operações de arquivos não
+são aceitos. Contrato: [ADR-0026](../architecture/ADR-0026-rust-quick-fixes-and-auto-imports.md).
+
+Validação da entrega 10: 210 testes Rust (198 unitários + 12 de fronteira),
+um opcional de provider ignorado, 35 testes JavaScript, fmt/clippy sem warnings,
+sintaxe e build aprovados. Os 32 grupos da jornada nativa passaram com
+rust-analyzer real: Ctrl+Espaço insere símbolo/import e um Ctrl+Z remove ambos;
+Ctrl+. aplica a correção e permite desfazer, sem escrita implícita em disco.
+Evidência: `target/e2e-quickfix/report.json`, via driver nativo direto e handlers
+DOM. Homologação manual de entrada do SO permanece pendente. A entrega 10 ainda
+não foi enviada ao CI remoto. Próximo item: monitor incremental para projetos maiores.
 
 Primeira entrega após o levantamento do produto, ainda local:
 

@@ -315,6 +315,9 @@ fn handle(
             caps["definitionProvider"] == true || caps["definitionProvider"].is_object();
         state.queries.completion =
             caps["completionProvider"] == true || caps["completionProvider"].is_object();
+        state.queries.completion_resolve = caps["completionProvider"]["resolveProvider"] == true;
+        state.queries.code_action =
+            caps["codeActionProvider"] == true || caps["codeActionProvider"].is_object();
         state.queries.references =
             caps["referencesProvider"] == true || caps["referencesProvider"].is_object();
         state.queries.rename = caps["renameProvider"] == true || caps["renameProvider"].is_object();

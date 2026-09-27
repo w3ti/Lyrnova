@@ -21,18 +21,22 @@ Com a análise ativa, os recursos de edição são:
 
 | Ação | Atalho | Resultado |
 | --- | --- | --- |
-| Autocompletar símbolos | Ctrl+Espaço, `.` ou `:` | Sugestões semânticas junto dos snippets existentes |
+| Autocompletar símbolos | Ctrl+Espaço, `.` ou `:` | Sugestões semânticas e auto-imports junto dos snippets existentes |
+| Correção rápida | Ctrl+. ou lâmpada do editor | Aplica uma correção ao rascunho, incluindo imports de símbolos não resolvidos |
 | Encontrar referências | Shift+F12 ou menu de contexto | Lista navegável, incluindo a declaração |
 | Renomear símbolo | F2 | Atualiza rascunhos dos arquivos afetados e abre os que estavam fechados |
 | Formatar documento | Shift+Alt+F | Aplica rustfmt da toolchain selecionada ao rascunho |
 
-Renomeação e formatação não salvam os arquivos. Use Ctrl+Z para desfazer em cada
+Correções rápidas, auto-imports, renomeação e formatação não salvam os arquivos. Use Ctrl+Z para desfazer em cada
 arquivo e Ctrl+S para salvar. O backup de sessão inclui as abas afetadas. Conflitos,
 resultados obsoletos e renomeações de arquivos/bibliotecas externas são recusados.
 A formatação exige `rustfmt` instalado na toolchain selecionada; não há instalação
 automática. Nome inválido ou ferramenta indisponível preservam o rascunho.
 
-Autocomplete não resolve auto-imports nesta etapa. Renomeação prepara até 32 abas;
+Auto-import insere o símbolo e seu `use` juntos; um Ctrl+Z desfaz ambos. A lista
+resolve até 32 candidatos por consulta; digite mais para refinar os resultados.
+Correções que exigem comandos ou criação/remoção de arquivos não são oferecidas.
+Renomeação e correções rápidas preparam até 32 abas;
 o levantamento inicial das fontes limita-se a 512 arquivos Rust / 8 MiB. A lista
 de referências aceita até 256 localizações. Mudanças nas fontes ou configuração Rust dentro do projeto são detectadas
 automaticamente: a análise reinicia preservando rascunhos e o ambiente autorizado.
@@ -69,4 +73,5 @@ Contratos: [diagnósticos](../architecture/ADR-0021-rust-lsp-diagnostics.md),
 [definição/hover](../architecture/ADR-0022-rust-symbol-queries.md) e
 [ambientes/dependências](../architecture/ADR-0023-rust-toolchains-and-local-dependencies.md) e
 [ações de edição](../architecture/ADR-0024-rust-editing-actions.md) e
-[alterações externas](../architecture/ADR-0025-workspace-external-changes.md).
+[alterações externas](../architecture/ADR-0025-workspace-external-changes.md) e
+[correções rápidas/auto-imports](../architecture/ADR-0026-rust-quick-fixes-and-auto-imports.md).

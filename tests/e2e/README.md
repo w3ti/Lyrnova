@@ -137,3 +137,8 @@ envia comandos da sessão diretamente à porta nativa. O relatório registra
 `commandTransport`; não há retry implícito de clicks/comandos que poderiam ter
 sido executados antes de perder a resposta. Esse modo exercita o mesmo binário,
 WebView e IPC reais. O modo padrão do CI permanece passando pelo proxy.
+
+A jornada Rust também verifica auto-import via Ctrl+Espaço (símbolo e `use` em
+um único desfazer), resolução por ID opaco e correção rápida via Ctrl+.
+O arquivo em disco precisa permanecer inalterado após ambas as ações; apenas
+os rascunhos recebem as edições. Atalhos continuam acionados pelos handlers DOM.

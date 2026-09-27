@@ -10,7 +10,7 @@ function setup() {
   const providers = {}, calls = [], navigations = [];
   const model = { getVersionId: () => modelVersion, isDisposed: () => false };
   const monaco = {
-    languages: { registerCompletionItemProvider() {}, registerDocumentFormattingEditProvider() {}, registerRenameProvider() {}, registerHoverProvider(_language, provider) { providers.hover = provider.provideHover; }, registerDefinitionProvider(_language, provider) { providers.definition = provider.provideDefinition; } },
+    languages: { registerCodeActionProvider() {}, registerCompletionItemProvider() {}, registerDocumentFormattingEditProvider() {}, registerRenameProvider() {}, registerHoverProvider(_language, provider) { providers.hover = provider.provideHover; }, registerDefinitionProvider(_language, provider) { providers.definition = provider.provideDefinition; } },
     editor: { setModelMarkers() {}, registerEditorOpener(opener) { providers.open = opener.openCodeEditor; } },
     Uri: { from: ({ path }) => ({ toString: () => `file://${path}` }) },
   };

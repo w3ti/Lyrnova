@@ -318,3 +318,17 @@ excluído, binário ou indisponível nunca substitui um rascunho divergente. Det
 mudanças Rust invalida consultas antigas no backend antes de reiniciar a análise.
 A observação tem limites e latência explícitos (ADR-0025); não substitui o CAS do
 salvamento nem observa diretórios externos do cache/toolchain.
+
+### Correções rápidas e resolução de imports
+
+`code_action` retorna apenas quickfixes com WorkspaceEdit validado. O levantamento
+prévio de fontes e a preparação integral/versionada de rascunhos são os mesmos da
+renomeação; nenhum modelo é criado até a seleção da correção. Comandos, recursos
+externos, operações de arquivos e edições anotadas/sobrepostas são descartados.
+`completion_resolve` aceita somente UUIDs gerados pelo backend para itens recebidos
+na sessão atual, vinculados a caminho, posição, versão e revisão, com expiração e
+cache limitado. Dados brutos do servidor não são aceitos do frontend. Resolução
+não pode alterar a inserção original; imports adicionais são validados e resolvidos
+antes da aceitação da sugestão. Não há grant novo de escrita, comandos LSP genéricos
+ou salvamento implícito. Limites e janela de detecção de mudanças externas seguem
+as ADRs 0024–0025; detalhes na [ADR-0026](../architecture/ADR-0026-rust-quick-fixes-and-auto-imports.md).

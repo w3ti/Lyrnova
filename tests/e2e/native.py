@@ -532,6 +532,41 @@ def exercise_rust_actions(browser, workspace, report, valid, session):
     assert (workspace/'src/lib.rs').read_text() == valid
     report['checks'].append('Rust semantic completion via IPC and Ctrl+Space; accepted into unsaved draft')
 
+    # Import completions must be resolved before Enter so the import and symbol
+    # belong to the same edit/undo group, even for immediate acceptance.
+    importing = 'mod helper;\npub fn answer() -> i32 { tar }\n'
+    revision = replace(importing)
+    import_column = importing.splitlines()[1].index('tar') + 3
+    completions = query('completion', revision, 1, import_column)
+    imported = next((i for i in completions['items'] if 'target' in i['label'] and i.get('resolveId')), None)
+    assert imported, completions
+    resolved = query('completion_resolve', revision, 1, import_column, resolveId=imported['resolveId'])
+    assert any('use ' in e['newText'] and 'target' in e['newText'] for e in resolved['items'][0]['additional']), resolved
+    report['rustAutoImportEdits'] = resolved['items'][0]['additional']
+    position(1, import_column); key(' ', 'Space', 32, ctrl=True)
+    browser.until('document.querySelector(".suggest-widget.visible .monaco-list-row.focused")?.textContent.includes("use crate::helper::target")', 'resolved auto-import completion popup')
+    key('Enter', 'Enter', 13)
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("use crate::helper::target;") && document.querySelector("#source-editor .view-lines").textContent.includes("target()")', 'completion inserts symbol and import together')
+    key('Escape','Escape',27)
+    assert (workspace/'src/lib.rs').read_text() == valid
+    key('z','KeyZ',90,ctrl=True)
+    browser.until('!document.querySelector("#source-editor .view-lines").textContent.includes("use") && document.querySelector("#source-editor .view-lines").textContent.includes("tar")', 'one undo removes auto-import and completion')
+    report['checks'].append('Rust auto-import resolves opaque completion, inserts use and symbol together and undoes both without saving')
+
+    missing_import = 'mod helper;\npub fn answer() -> i32 { target() }\n'
+    revision = replace(missing_import)
+    import_column = missing_import.splitlines()[1].index('target') + 1
+    actions = query('code_action', revision, 1, import_column)
+    assert any('target' in a['title'] and a['edits'] for a in actions), actions
+    position(1, import_column); key('.', 'Period', 190, ctrl=True)
+    browser.until('Array.from(document.querySelectorAll(".action-widget .monaco-list-row")).some(n => n.textContent.includes("target"))', 'Ctrl+. Rust quick fixes')
+    browser.script('Array.from(document.querySelectorAll(".action-widget .monaco-list-row")).find(n => n.textContent.includes("target")).click()')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("use crate::helper::target;")', 'quick fix imports unresolved symbol')
+    assert (workspace/'src/lib.rs').read_text() == valid
+    key('z','KeyZ',90,ctrl=True)
+    browser.until('!document.querySelector("#source-editor .view-lines").textContent.includes("use")', 'quick fix undo')
+    report['checks'].append('Rust quick fix via IPC and Ctrl+. imports unresolved symbol into draft with undo and unchanged disk')
+
     revision = replace(valid)
     column = valid.splitlines()[1].index('target') + 1
     refs = query('references', revision, 1, column)

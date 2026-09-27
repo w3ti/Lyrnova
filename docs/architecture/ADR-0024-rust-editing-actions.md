@@ -14,7 +14,8 @@ texto, snippets, ranges UTF-16 e edições adicionais do mesmo documento, sem
 sobreposição. Até 256 sugestões por resposta, com indicação de lista incompleta.
 Documentação Markdown e comandos do servidor não são repassados; itens que exigem
 comandos são descartados. Auto-import está desativado; completion resolve não faz
-parte desta entrega.
+parte desta entrega. A [ADR-0026](ADR-0026-rust-quick-fixes-and-auto-imports.md)
+amplia este contrato com auto-imports e correções rápidas.
 
 Shift+F12 e o menu de contexto abrem uma lista navegável de referências, incluindo
 a declaração. Até 256 localizações, com a mesma validação de caminhos/ranges de

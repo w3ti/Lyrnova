@@ -1,5 +1,11 @@
 # Validação nativa do MVP — 2026-09-25
 
+Atualização: o [CI de `af79332`](https://github.com/w3ti/Lyrnova/actions/runs/36177855431)
+passou, incluindo a jornada nativa das entregas 1–9. Isso supera as indicações
+históricas de CI pendente abaixo. A homologação manual de teclado/mouse do SO,
+diálogos nativos e a matriz de ambientes continuam pendentes.
+
+
 Atualização posterior nesta data: o PTY Linux foi implementado e a jornada foi
 ampliada para ANSI, resize, Ctrl+C/Ctrl+D e reinício após EOF. O backend passou em
 171 testes Rust, incluindo limites e limpeza de jobs foreground/background/disown.
@@ -136,3 +142,15 @@ ou destruir a janela. Há teste Rust de regressão para o comando filho.
   remota depende de publicação autorizada das alterações.
 
 Reprodução e limites completos: [guia da suíte](../../tests/e2e/README.md).
+
+
+## Correções rápidas e auto-imports
+
+A entrega 10 passou em 210 testes Rust (198 unitários + 12 de fronteira, um
+opcional ignorado), 35 testes JavaScript, fmt/clippy/sintaxe/build e 32 grupos
+nativos. O relatório `target/e2e-quickfix/report.json` registra Ctrl+Espaço com
+resolução de import, inserção conjunta de símbolo/`use`, desfazer conjunto,
+Ctrl+. para corrigir símbolo não resolvido e ausência de salvamento implícito.
+A jornada usa rust-analyzer/rustfmt reais, perfil isolado e comandos via driver
+nativo direto; teclado/mouse do SO continuam fora dessa evidência. Esta entrega
+permanece local e ainda não foi validada no CI remoto.

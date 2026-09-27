@@ -113,3 +113,12 @@ Rascunhos, exclusões e substituições incompatíveis usam o aviso de conflito 
 existente, com salvar cópia ou reler explicitamente. Atualizações repetidas não
 apagam mensagens de falha ao salvar. A análise Rust mostra novamente seu estado
 de inicialização ao recarregar fontes externas ao editor.
+
+### Correções rápidas Rust
+
+Com análise Rust ativa, Ctrl+. e a lâmpada do Monaco oferecem correções rápidas
+aplicáveis à seleção. As ações alteram rascunhos e participam do desfazer; não
+salvam automaticamente. Ctrl+Espaço inclui auto-imports prontos para aceitação,
+inserindo símbolo e `use` juntos. Resultados obsoletos são recusados, e falhas na
+aplicação aparecem no status de ações da análise. Comandos do servidor e ações
+que criam, removem ou renomeiam arquivos não aparecem nesta etapa.

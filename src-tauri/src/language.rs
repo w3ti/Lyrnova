@@ -327,7 +327,7 @@ fn uri(path: &str) -> String {
 fn configuration() -> Value {
     json!({
         "cargo": {"buildScripts": {"enable": false, "rebuildOnSave": false}, "autoreload": false, "noDeps": true, "sysroot": null},
-        "completion": {"autoimport": {"enable": false}},
+        "completion": {"autoimport": {"enable": true}},
         "procMacro": {"enable": false}, "checkOnSave": false,
         "cachePriming": {"enable": false}, "numThreads": 2,
         "diagnostics": {"enable": true}, "files": {"watcher": "client"}
@@ -342,9 +342,10 @@ fn initialization() -> Value {
             "workspace":{"configuration":true, "applyEdit":false},
             "textDocument":{"hover":{"contentFormat":["plaintext"], "dynamicRegistration":false},
                 "definition":{"linkSupport":true, "dynamicRegistration":false},
-                "completion":{"completionItem":{"snippetSupport":true,"documentationFormat":["plaintext"]}},
+                "completion":{"completionItem":{"snippetSupport":true,"documentationFormat":["plaintext"],"resolveSupport":{"properties":["additionalTextEdits","detail"]}}},
                 "references":{"dynamicRegistration":false}, "rename":{"dynamicRegistration":false},
                 "formatting":{"dynamicRegistration":false},
+                "codeAction":{"dynamicRegistration":false,"codeActionLiteralSupport":{"codeActionKind":{"valueSet":["quickfix"]}}},
                 "publishDiagnostics":{"versionSupport":true}, "synchronization":{"didSave":false, "dynamicRegistration":false}}},
         "initializationOptions": configuration()
     }})
@@ -545,6 +546,16 @@ mod tests {
         assert_eq!(options["procMacro"]["enable"], false);
         assert_eq!(options["checkOnSave"], false);
         assert_eq!(options["cargo"]["noDeps"], true);
+        assert_eq!(options["completion"]["autoimport"]["enable"], true);
+        assert_eq!(
+            init["params"]["capabilities"]["textDocument"]["completion"]["completionItem"]["resolveSupport"]
+                ["properties"],
+            json!(["additionalTextEdits", "detail"])
+        );
+        assert_eq!(
+            init["params"]["capabilities"]["workspace"]["applyEdit"],
+            false
+        );
         assert_eq!(
             init["params"]["capabilities"]["general"]["positionEncodings"],
             json!(["utf-16"])

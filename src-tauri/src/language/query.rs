@@ -14,6 +14,8 @@ pub enum QueryKind {
     Hover,
     Definition,
     Completion,
+    CompletionResolve,
+    CodeAction,
     References,
     Rename,
     Formatting,
@@ -29,6 +31,10 @@ pub struct LanguageQuery {
     pub position: Position,
     #[serde(default)]
     pub new_name: Option<String>,
+    #[serde(default)]
+    pub resolve_id: Option<String>,
+    #[serde(default)]
+    pub end: Option<Position>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +61,7 @@ pub enum QueryResult {
     Definition(Vec<Definition>),
     References(Vec<Definition>),
     Completion(super::editing::Completions),
+    CodeAction(Vec<super::editing::CodeAction>),
     Rename(Vec<super::editing::DocumentEdits>),
     Formatting(Vec<super::editing::TextEdit>),
 }
@@ -66,12 +73,22 @@ pub(super) struct Queries {
     pub hover: bool,
     pub definition: bool,
     pub completion: bool,
+    pub completion_resolve: bool,
+    pub code_action: bool,
+    resolutions: BTreeMap<String, Resolution>,
     pub references: bool,
     pub rename: bool,
     pub formatting: bool,
     pending: BTreeMap<u64, Pending>,
 }
+struct Resolution {
+    query: LanguageQuery,
+    revision: u64,
+    expires: Instant,
+    raw: Value,
+}
 struct Pending {
+    resolved: Option<Value>,
     query: LanguageQuery,
     revision: u64,
     deadline: Instant,
@@ -80,6 +97,7 @@ struct Pending {
     reply: mpsc::SyncSender<Result<Value, LanguageError>>,
 }
 pub struct QueryTicket {
+    resolved: Option<Value>,
     baselines: BTreeMap<String, String>,
     query: LanguageQuery,
     revision: u64,
@@ -144,17 +162,48 @@ impl LanguageService {
         } else if query.new_name.is_some() {
             return Err(LanguageError::InvalidDocument);
         }
+        if query.kind == QueryKind::CodeAction {
+            valid_range(
+                &doc.text,
+                &json!({"start":query.position,"end":query.end.unwrap_or(query.position)}),
+            )?;
+        } else if query.end.is_some() {
+            return Err(LanguageError::InvalidDocument);
+        }
         let queries = &mut state.queries;
         if !match query.kind {
             QueryKind::Hover => queries.hover,
             QueryKind::Definition => queries.definition,
             QueryKind::Completion => queries.completion,
+            QueryKind::CompletionResolve => queries.completion_resolve,
+            QueryKind::CodeAction => queries.code_action,
             QueryKind::References => queries.references,
             QueryKind::Rename => queries.rename,
             QueryKind::Formatting => queries.formatting,
         } {
             return Err(LanguageError::UnsupportedFeature);
         }
+        let resolved = if query.kind == QueryKind::CompletionResolve {
+            let entry = query
+                .resolve_id
+                .as_ref()
+                .and_then(|id| queries.resolutions.get(id))
+                .ok_or(LanguageError::StaleDocument)?;
+            if entry.revision != queries.revision
+                || entry.expires <= Instant::now()
+                || entry.query.path != query.path
+                || entry.query.version != query.version
+                || entry.query.position != query.position
+            {
+                return Err(LanguageError::StaleDocument);
+            }
+            Some(entry.raw.clone())
+        } else {
+            if query.resolve_id.is_some() {
+                return Err(LanguageError::InvalidDocument);
+            }
+            None
+        };
         if queries.pending.len() >= MAX_PENDING
             || queries
                 .pending
@@ -171,7 +220,7 @@ impl LanguageService {
             .next_id
             .checked_add(2)
             .ok_or(LanguageError::StateUnavailable)?; // initialize=1, shutdown=2
-        let baselines = if query.kind == QueryKind::Rename {
+        let baselines = if matches!(query.kind, QueryKind::Rename | QueryKind::CodeAction) {
             super::editing::baselines(root)?
         } else {
             BTreeMap::new()
@@ -181,6 +230,7 @@ impl LanguageService {
         queries.pending.insert(
             wire_id,
             Pending {
+                resolved: resolved.clone(),
                 query: query.clone(),
                 revision: queries.revision,
                 deadline: Instant::now() + TIMEOUT,
@@ -190,6 +240,7 @@ impl LanguageService {
             },
         );
         Ok(QueryTicket {
+            resolved,
             baselines,
             query,
             revision: queries.revision,
@@ -234,7 +285,7 @@ impl LanguageService {
             .lock()
             .map_err(|_| LanguageError::StateUnavailable)?;
         let current = matching(&session, root, id)?;
-        let state = current
+        let mut state = current
             .state
             .lock()
             .map_err(|_| LanguageError::StateUnavailable)?;
@@ -247,8 +298,32 @@ impl LanguageService {
         if state.snapshot.state != "running" {
             return Err(LanguageError::ServerExited);
         }
-        let result = parse_result(root, &ticket.query, value, &state.documents, &state.sources)?;
-        if let QueryResult::Rename(edits) = &result {
+        let value = if let Some(original) = &ticket.resolved {
+            // Only additionalTextEdits and plain detail may resolve. Insertion, range,
+            // snippets and commands cannot change after presenting a suggestion.
+            for key in [
+                "label",
+                "textEdit",
+                "insertText",
+                "insertTextFormat",
+                "command",
+            ] {
+                if value.get(key) != original.get(key) {
+                    return Err(LanguageError::ProtocolViolation);
+                }
+            }
+            json!([value])
+        } else {
+            value
+        };
+        let mut result =
+            parse_result(root, &ticket.query, value, &state.documents, &state.sources)?;
+        let groups: Vec<&Vec<super::editing::DocumentEdits>> = match &result {
+            QueryResult::Rename(edits) => vec![edits],
+            QueryResult::CodeAction(actions) => actions.iter().map(|a| &a.edits).collect(),
+            _ => vec![],
+        };
+        for edits in groups {
             for edit in edits {
                 if !state.documents.contains_key(&edit.path)
                     && ticket.baselines.get(&edit.path) != Some(&edit.original)
@@ -257,11 +332,49 @@ impl LanguageService {
                 }
             }
         }
+        if ticket.query.kind == QueryKind::Completion {
+            state.queries.cache_completions(&ticket.query, &mut result);
+        }
         Ok(result)
     }
 }
 
 impl Queries {
+    fn cache_completions(&mut self, query: &LanguageQuery, result: &mut QueryResult) {
+        let QueryResult::Completion(completions) = result else {
+            return;
+        };
+        // One bounded result set per session. Opaque IDs never expose raw server data.
+        self.resolutions.clear();
+        let mut bytes = 0;
+        completions.items.retain_mut(|item| {
+            let Some(raw) = item.raw.take() else {
+                return true;
+            };
+            if !self.completion_resolve {
+                completions.incomplete = true;
+                return false;
+            }
+            bytes += raw.to_string().len();
+            if bytes > 2 * 1024 * 1024 {
+                completions.incomplete = true;
+                return false;
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            self.resolutions.insert(
+                id.clone(),
+                Resolution {
+                    query: query.clone(),
+                    revision: self.revision,
+                    expires: Instant::now() + Duration::from_secs(120),
+                    raw,
+                },
+            );
+            item.resolve_id = Some(id);
+            true
+        });
+    }
+
     // Called after document synchronization, in the same worker/output queue.
     pub fn messages(&mut self) -> Vec<Value> {
         let mut messages = Vec::new();
@@ -277,11 +390,19 @@ impl Queries {
             if !pending.sent {
                 let method = match pending.query.kind {
                     QueryKind::Hover => "textDocument/hover", QueryKind::Definition => "textDocument/definition",
-                    QueryKind::Completion => "textDocument/completion", QueryKind::References => "textDocument/references",
+                    QueryKind::Completion => "textDocument/completion",
+                    QueryKind::CompletionResolve => "completionItem/resolve",
+                    QueryKind::CodeAction => "textDocument/codeAction", QueryKind::References => "textDocument/references",
                     QueryKind::Rename => "textDocument/rename", QueryKind::Formatting => "textDocument/formatting",
                 };
                 let mut params = json!({"textDocument":{"uri":uri(&pending.query.path)}, "position":pending.query.position});
                 match pending.query.kind {
+                    QueryKind::CompletionResolve => params = pending.resolved.clone().expect("validated resolution"),
+                    QueryKind::CodeAction => {
+                        params.as_object_mut().unwrap().remove("position");
+                        params["range"] = json!({"start":pending.query.position,"end":pending.query.end.unwrap_or(pending.query.position)});
+                        params["context"] = json!({"diagnostics":[],"only":["quickfix"]});
+                    },
                     QueryKind::References => params["context"] = json!({"includeDeclaration":true}),
                     QueryKind::Rename => params["newName"] = json!(pending.query.new_name),
                     QueryKind::Formatting => { params.as_object_mut().unwrap().remove("position"); params["options"] = json!({"tabSize":4,"insertSpaces":true}); },
@@ -316,6 +437,7 @@ impl Queries {
     }
     pub fn stop(&mut self) {
         self.pending.clear();
+        self.resolutions.clear();
     }
 }
 
@@ -481,9 +603,11 @@ fn parse_result(
                 .transpose()?;
             Ok(QueryResult::Hover(Some(Hover { text, range })))
         }
-        QueryKind::Completion | QueryKind::Rename | QueryKind::Formatting => {
-            super::editing::parse(root, query, value, docs)
-        }
+        QueryKind::Completion
+        | QueryKind::CompletionResolve
+        | QueryKind::CodeAction
+        | QueryKind::Rename
+        | QueryKind::Formatting => super::editing::parse(root, query, value, docs),
         QueryKind::Definition | QueryKind::References => {
             let entries = if value.is_null() {
                 vec![]
@@ -668,6 +792,8 @@ mod tests {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 kind,
                 new_name: None,
+                resolve_id: None,
+                end: None,
                 path: "src/lib.rs".into(),
                 version: 1,
                 position: Position {
@@ -684,6 +810,120 @@ mod tests {
     }
     fn range(start: u32, end: u32) -> Value {
         json!({"start":{"line":0,"character":start},"end":{"line":0,"character":end}})
+    }
+
+    fn completion_token(f: &Fixture) -> (String, Value) {
+        {
+            let mut state = f.state.lock().unwrap();
+            state.queries.completion = true;
+            state.queries.completion_resolve = true;
+        }
+        let q = f.query(QueryKind::Completion);
+        let ticket = f.service.query(&f.root, "session", q).unwrap();
+        let raw = json!({"label":"answer","textEdit":{"range":{"start":{"line":1,"character":7},"end":{"line":1,"character":13}},"newText":"answer"},"data":{"imports":["secret-server-data"]}});
+        let result = f
+            .service
+            .finish_query(&f.root, "session", &ticket, json!([raw]))
+            .unwrap();
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert!(!encoded.to_string().contains("secret-server-data"));
+        (
+            encoded["value"]["items"][0]["resolveId"]
+                .as_str()
+                .unwrap()
+                .into(),
+            raw,
+        )
+    }
+    #[test]
+    fn completion_resolution_is_opaque_bound_and_preserves_the_presented_insertion() {
+        let f = Fixture::new();
+        let (id, mut raw) = completion_token(&f);
+        let mut q = f.query(QueryKind::CompletionResolve);
+        q.resolve_id = Some(id);
+        let ticket = f.service.query(&f.root, "session", q.clone()).unwrap();
+        raw["additionalTextEdits"] =
+            json!([{"range":range(0,0),"newText":"use crate::helper::answer;\n"}]);
+        let resolved = f
+            .service
+            .finish_query(&f.root, "session", &ticket, raw.clone())
+            .unwrap();
+        assert!(
+            serde_json::to_value(resolved).unwrap()["value"]["items"][0]["additional"]
+                .as_array()
+                .unwrap()
+                .len()
+                == 1
+        );
+        for key in ["command", "textEdit", "label", "insertTextFormat"] {
+            let mut changed = raw.clone();
+            changed[key] = json!("injected");
+            assert!(
+                f.service
+                    .finish_query(&f.root, "session", &ticket, changed)
+                    .is_err()
+            );
+        }
+        raw["additionalTextEdits"] = json!([{"range":{"start":{"line":1,"character":7},"end":{"line":1,"character":8}},"newText":"overlap"}]);
+        assert!(
+            f.service
+                .finish_query(&f.root, "session", &ticket, raw)
+                .is_err()
+        );
+        q.position.character += 1;
+        assert!(matches!(
+            f.service.query(&f.root, "session", q.clone()),
+            Err(LanguageError::StaleDocument)
+        ));
+        q.position.character -= 1;
+        q.resolve_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(matches!(
+            f.service.query(&f.root, "session", q),
+            Err(LanguageError::StaleDocument)
+        ));
+    }
+    #[test]
+    fn completion_resolution_expires_and_invalidates_on_disk_revision_and_stop() {
+        for reason in ["expiry", "revision", "stop"] {
+            let f = Fixture::new();
+            let (id, _) = completion_token(&f);
+            let mut q = f.query(QueryKind::CompletionResolve);
+            q.resolve_id = Some(id.clone());
+            {
+                let mut state = f.state.lock().unwrap();
+                match reason {
+                    "expiry" => {
+                        state.queries.resolutions.get_mut(&id).unwrap().expires = Instant::now()
+                    }
+                    "revision" => state.queries.revision += 1,
+                    _ => state.queries.stop(),
+                }
+            }
+            assert!(matches!(
+                f.service.query(&f.root, "session", q),
+                Err(LanguageError::StaleDocument)
+            ));
+        }
+    }
+    #[test]
+    fn quick_fix_refuses_changed_closed_file_and_sends_only_the_closed_method() {
+        let f = Fixture::new();
+        f.state.lock().unwrap().queries.code_action = true;
+        std::fs::write(f.root.join("src/other.rs"), "fn before() {}\n").unwrap();
+        let q = f.query(QueryKind::CodeAction);
+        let ticket = f.service.query(&f.root, "session", q).unwrap();
+        let messages = f.state.lock().unwrap().queries.messages();
+        assert_eq!(messages[0]["method"], "textDocument/codeAction");
+        assert_eq!(
+            messages[0]["params"]["context"]["only"],
+            json!(["quickfix"])
+        );
+        std::fs::write(f.root.join("src/other.rs"), "fn edited() {}\n").unwrap();
+        let raw = json!([{"title":"Fix","kind":"quickfix","edit":{"changes":{"file:///workspace/src/other.rs":[{"range":range(3,9),"newText":"after"}]}}}]);
+        assert!(matches!(
+            f.service.finish_query(&f.root, "session", &ticket, raw),
+            Err(LanguageError::StaleDocument)
+        ));
     }
 
     #[test]
