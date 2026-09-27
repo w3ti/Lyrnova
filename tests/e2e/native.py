@@ -98,6 +98,12 @@ class Browser:
         """, selector)
 
     def type(self, selector, text, replace=False):
+        # Monaco updates its textarea/focus state on an animation frame. Wait for
+        # that state before dispatching input, especially after clicking toolbars.
+        self.command("POST", "/execute/async", {
+            "script": "const node=document.querySelector(arguments[0]); node.focus(); const done=arguments[1]; requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));",
+            "args": [selector],
+        })
         self.script("""
             const [selector, text, replace] = arguments;
             const node = document.querySelector(selector);
@@ -500,6 +506,38 @@ def exercise_workspace_watch(browser, workspace, report):
 
 
 
+def exercise_large_workspace(browser, workspace, report):
+    incoming = workspace.parent / 'incoming-tree'
+    incoming.mkdir()
+    for directory in range(6):
+        folder = incoming / f'd{directory}'
+        folder.mkdir()
+        for number in range(1000):
+            (folder / f'f{number}.txt').write_text('large tree original\n')
+    incoming.rename(workspace / 'bulk')
+    browser.until('!!document.querySelector(\'[data-file="bulk/d5/f999.txt"]\')', 'Explorer discovers more than 5000 files')
+    assert len(browser.invoke('workspace_list')) > 6000
+    snapshot = browser.invoke('workspace_poll', {'workspace':str(workspace),'token':None,'paths':[]})
+    assert snapshot['mode'] == 'events', snapshot
+    browser.click('[data-file="bulk/d5/f999.txt"]')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("large tree original")', 'large workspace file opens')
+    browser.script('document.querySelector(\'[data-file="bulk/d5/f999.txt"]\').dataset.e2eIdentity = "keep"')
+    target = workspace / 'bulk/d5/f999.txt'
+    target.write_text('large tree changed\n')
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("large tree changed")', 'large workspace clean tab reloads')
+    assert browser.script('return document.querySelector(\'[data-file="bulk/d5/f999.txt"]\').dataset.e2eIdentity === "keep"'), 'Content-only edit rebuilt the Explorer'
+    browser.type('#source-editor textarea.inputarea','large tree draft',replace=True)
+    target.write_text('external conflicting large tree\n')
+    browser.until('!document.querySelector("#editor-recovery").hidden', 'large workspace dirty tab preserved')
+    assert browser.script('return document.querySelector("#source-editor .view-lines").textContent.replace(/\\s/g," ").includes("large tree draft")')
+    (workspace / 'bulk').rename(workspace / 'batch')
+    browser.until('!!document.querySelector(\'[data-directory="batch"]\') && !document.querySelector(\'[data-directory="bulk"]\')', 'large directory rename reconciles Explorer')
+    browser.click('[data-close-editor-path="bulk/d5/f999.txt"]')
+    shutil.rmtree(workspace / 'batch')
+    browser.until('!document.querySelector(\'[data-directory="batch"]\')', 'large directory removal reconciles Explorer')
+    report['checks'].append('6000-file workspace: event monitoring, complete Explorer, clean reload without rebuilding tree, preserved dirty draft, directory rename and deletion')
+
+
 def exercise_rust_actions(browser, workspace, report, valid, session):
     def key(key, code, number, ctrl=False, shift=False, alt=False, selector='#source-editor textarea.inputarea'):
         browser.script("""
@@ -681,8 +719,18 @@ def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
         const key = (key, code, keyCode, ctrlKey = false) => input.dispatchEvent(new KeyboardEvent('keydown', {key, code, keyCode, which:keyCode, ctrlKey, bubbles:true, cancelable:true}));
         key('Home', 'Home', 36, true); key('ArrowDown', 'ArrowDown', 40); key('Home', 'Home', 36);
         for (let i=0; i<arguments[0]; i++) key('ArrowRight', 'ArrowRight', 39);
-        key('k', 'KeyK', 75, true); key('i', 'KeyI', 73, true);
+        key('F1', 'F1', 112);
     """, position["character"])
+    # Ctrl+K belongs to the application's palette, including inside Monaco.
+    # Reach the editor's hover command through its own F1 command menu instead.
+    browser.until('!!document.querySelector(".quick-input-widget input")?.getClientRects().length', "Monaco command menu")
+    browser.type('.quick-input-widget input', '>Show or Focus Hover', replace=True)
+    browser.until('document.querySelector(".quick-input-list .monaco-list-row.focused")?.textContent.includes("Show or Focus Hover")', "hover command selected")
+    browser.script("""
+        document.querySelector('.quick-input-widget input').dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+        }));
+    """)
     browser.until('document.querySelector(".monaco-hover")?.textContent.includes("fixture answer")', "Monaco hover provider")
     assert browser.script('return !!document.querySelector(".monaco-hover .markdown-hover")')
     assert browser.script('return document.querySelectorAll(".monaco-hover .markdown-hover a, .monaco-hover .markdown-hover img").length') == 0
@@ -894,6 +942,7 @@ def main():
                 assert browser.script('return !document.querySelector("[data-editor-path]") && document.querySelector("#editor-workspace").dataset.empty === "true"')
                 report["checks"].append("normal close flushes drafts; explicitly closed tabs stay closed after restart")
                 exercise_workspace_watch(browser, workspace, report)
+                exercise_large_workspace(browser, workspace, report)
                 if args.rust_analyzer:
                     exercise_rust_diagnostics(browser, workspace, report, process.pid)
                 else:

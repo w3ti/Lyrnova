@@ -1,5 +1,19 @@
 # Levantamento de pendências do produto — 2026-09-25
 
+Atualização em 2026-09-27: correções rápidas e auto-imports publicados e validados
+no [CI de `e7fed1b`](https://github.com/w3ti/Lyrnova/actions/runs/36313326018).
+A entrega 11 local acrescenta monitor por eventos para até 100 mil entradas,
+cache compartilhado com o Explorer e ressincronização após perda de eventos.
+Busca de conteúdo, preparação de edições Rust e renderização da árvore ainda têm
+limites próprios; detalhes na [ADR-0027](../architecture/ADR-0027-incremental-workspace-monitor.md).
+
+A entrega 12 local acrescenta seis grupos de validação por eventos do SO em
+Xvfb: seletores GTK, criação/troca de projeto, edição, terminal e instalação com
+revisão. Corrige bloqueio dos seletores, fechamento do modal, limite de desfazer
+no salvamento e Ctrl+K dentro do Monaco. CI ampliado, ainda sem publicação;
+homologação humana, IME, acessibilidade, HiDPI e Wayland nativo seguem pendentes.
+
+
 Atualização após o levantamento: a primeira entrega foi implementada localmente,
 com diff real de worktree/índice, revisão integral e commit vinculado ao snapshot.
 Veja a [ADR-0018](../architecture/ADR-0018-git-diff-and-commit-review.md).

@@ -93,7 +93,9 @@ ordem das abas, arquivo ativo, cursor e rolagem; não reexecuta comandos do term
 
 Com a análise Rust ativada, F12 abre a definição em uma aba do projeto. Hover
 mostra tipos/documentação como texto inerte e também pode ser aberto por
-Ctrl+K, Ctrl+I. Diagnósticos aparecem como marcadores no Monaco e itens navegáveis
+F1 → **Show or Focus Hover**. Ctrl+K abre a paleta do Lyrnova inclusive no editor;
+os demais atalhos do Monaco, como Ctrl+Shift+K, continuam disponíveis.
+Diagnósticos aparecem como marcadores no Monaco e itens navegáveis
 no painel Problemas; editar remove os resultados obsoletos imediatamente.
 
 **Ambiente Rust** revisa a toolchain, a disponibilidade de rust-src e os diretórios

@@ -11,7 +11,10 @@ registram o escopo original de definição/hover.
 
 O plugin Rust autorizado registra os providers de definição e hover do Monaco.
 F12 navega até a definição, inclusive abrindo outra aba do projeto. Hover mostra
-tipos e documentação; também pode ser solicitado por Ctrl+K, Ctrl+I. São recursos
+tipos e documentação; também pode ser solicitado por F1 → **Show or Focus Hover**.
+Atualização de 2026-09-27: Ctrl+K foi reservado à paleta do aplicativo também no
+Monaco, corrigindo a divergência entre o atalho anunciado e o comportamento no editor.
+São recursos
 de leitura, usando o mesmo servidor isolado e os mesmos grants da ADR-0021.
 Não há novas permissões nem instalação automática de executáveis.
 

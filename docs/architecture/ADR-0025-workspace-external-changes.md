@@ -1,6 +1,8 @@
 # ADR-0025 — Alterações externas no workspace
 
-Status: implementada localmente em 2026-09-25.
+Status: implementada em 2026-09-25. A detecção e os limites abaixo foram
+ampliados pela [ADR-0027](ADR-0027-incremental-workspace-monitor.md) em 2026-09-27;
+a reconciliação e o contrato de invalidação Rust permanecem.
 
 Ações de Git, terminal e outras ferramentas podem modificar o disco enquanto o
 editor mantém modelos e rascunhos. O CAS no salvamento já recusava sobrescritas,

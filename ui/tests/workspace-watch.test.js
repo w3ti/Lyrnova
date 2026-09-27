@@ -40,7 +40,7 @@ function monitorFixture() {
   let context={workspace:"/a"}, response={token:"1",resync:true,changes:[],rustChanged:true}, deferred=null;
   const calls=[], reconciled=[], refreshed=[], invalidated=[], statuses=[];
   let accept=false;
-  const monitor=createWorkspaceMonitor({interval:60000, invoke:async(_command,args)=>{calls.push(args); return deferred ? deferred() : response;},context:()=>context,ready:()=>true,paths:()=>["file.rs"],reconcile:async(path)=>{reconciled.push(path);return accept;},refresh:async()=>refreshed.push(true),invalidateRust:()=>invalidated.push(true),status:(...args)=>statuses.push(args)});
+  const monitor=createWorkspaceMonitor({interval:60000, invoke:async(_command,args)=>{calls.push(args); return deferred ? deferred() : response;},context:()=>context,ready:()=>true,paths:()=>["file.rs"],reconcile:async(path)=>{reconciled.push(path);return accept;},refresh:async result=>refreshed.push(result),invalidateRust:()=>invalidated.push(true),status:(...args)=>statuses.push(args)});
   monitor.start();
   return {monitor,calls,reconciled,refreshed,invalidated,statuses,setResponse:v=>response=v,setDeferred:v=>deferred=v,accept:()=>accept=true, switch:()=>{context={workspace:"/b"};monitor.start();}};
 }
@@ -59,5 +59,20 @@ test("failed polling retains the cursor and retries, with a visible limit error"
   const f=monitorFixture();try{
     f.accept(); await f.monitor.pollNow(); f.setDeferred(()=>{throw {code:"too_large"};}); await f.monitor.pollNow();
     assert.equal(f.statuses.at(-1)[1],"error"); f.setDeferred(null); f.setResponse({token:"1",resync:false,changes:[],rustChanged:false}); await f.monitor.pollNow(); assert.equal(f.calls.at(-1).token,"1"); assert.equal(f.statuses.at(-1)[1],"watching");
+  }finally{f.monitor.stop();}
+});
+
+test("event batches distinguish content edits from tree changes and announce fallback",async()=>{
+  const f=monitorFixture();try{
+    f.accept(); await f.monitor.pollNow();
+    const content={token:"2",resync:false,changes:["file.rs"],rustChanged:true,treeChanged:false,mode:"events"};
+    f.setResponse(content); await f.monitor.pollNow();
+    assert.equal(f.statuses.at(-1)[0],"Arquivos acompanhados por eventos");
+    assert.equal(f.reconciled.at(-1),"file.rs");
+    assert.deepEqual(f.refreshed.at(-1),content);
+    f.setResponse({token:"2",resync:false,changes:[],rustChanged:false,treeChanged:false,mode:"polling"});
+    await f.monitor.pollNow(); assert.match(f.statuses.at(-1)[0],/compatibilidade/);
+    const count=f.refreshed.length;
+    await f.monitor.pollNow(); assert.equal(f.refreshed.length,count);
   }finally{f.monitor.stop();}
 });

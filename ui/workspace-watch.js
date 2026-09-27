@@ -1,12 +1,12 @@
 // One bounded poll at a time. A cursor is acknowledged only after its refresh was
 // handled; skipped tabs remain pending even if no further disk event arrives.
 export function createWorkspaceMonitor({ invoke, context, ready, paths, reconcile, refresh, invalidateRust, status, interval = 1500 }) {
-  let active = false, epoch = 0, token = null, timer = null, flight = null;
+  let active = false, epoch = 0, token = null, timer = null, flight = null, delay = interval;
   const pending = new Set();
   const valid = (expected, generation) => active && epoch === generation && ready() && context() === expected;
-  function schedule(delay = interval) {
+  function schedule(wait = delay) {
     if (!active || timer !== null) return;
-    timer = setTimeout(() => { timer = null; void pollNow(); }, delay);
+    timer = setTimeout(() => { timer = null; void pollNow(); }, wait);
   }
   function pollNow() {
     if (flight) return flight;
@@ -23,7 +23,7 @@ export function createWorkspaceMonitor({ invoke, context, ready, paths, reconcil
       if (result.rustChanged) invalidateRust();
       if (result.resync) for (const path of paths()) pending.add(path);
       else for (const path of result.changes) pending.add(path);
-      if (result.resync || result.changes.length) await refresh();
+      if (result.resync || result.changes.length) await refresh(result);
       if (!current()) return;
       const opened = new Set(paths());
       for (const path of [...pending]) {
@@ -31,13 +31,14 @@ export function createWorkspaceMonitor({ invoke, context, ready, paths, reconcil
         if (!current()) return;
       }
       token = result.token;
-      status("Arquivos acompanhados", "watching");
+      delay = result.mode === "polling" ? Math.max(interval, 5000) : interval;
+      status(result.mode === "polling" ? "Atualização por compatibilidade · pode levar até 5 segundos" : "Arquivos acompanhados por eventos", "watching");
     } catch (error) {
       if (current()) status(error?.code === "too_large" ? "Atualização automática limitada: projeto excede os limites de arquivos ou tamanho." : "Atualização automática indisponível; tentando novamente…", "error");
     }
   }
   function stop() { active = false; epoch++; clearTimeout(timer); timer = null; token = null; pending.clear(); status("", "idle"); }
-  function start() { stop(); active = true; schedule(0); }
+  function start() { stop(); delay = interval; active = true; schedule(0); }
   function wake() { if (active) { clearTimeout(timer); timer = null; void pollNow(); } }
   return { start, stop, wake, pollNow };
 }

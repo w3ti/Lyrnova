@@ -1,5 +1,61 @@
 # Checkpoint de desenvolvimento
 
+## Publicação das entregas 11–12 — 2026-09-27
+
+Este conjunto reúne o monitor incremental e as correções de entrada e diálogos.
+Validação local concluída: 218 testes Rust, 36 JavaScript, 33 grupos da jornada
+nativa e seis grupos de entrada do SO; fmt/clippy/sintaxe/build aprovados.
+A validação remota usa as duas jornadas no
+[workflow Quality](https://github.com/w3ti/Lyrnova/actions/workflows/quality.yml).
+As seções abaixo registram os resultados e o estado no momento de cada entrega.
+
+## Entrada do SO e diálogos — 2026-09-27
+
+Entrega 12, local: `tests/e2e/native_input.py` exercita teclado/mouse via XTest
+num Xvfb privado, com perfil e D-Bus descartáveis. WebDriver apenas observa o DOM.
+Passaram seis grupos: abertura/cancelamento, criação com Git, edição e atalhos,
+terminal, troca de projeto com rascunho e instalação local com revisão de permissões.
+Evidência: `target/e2e-input/report.json`. A suíte foi adicionada ao workflow,
+mas esta entrega e o monitor incremental ainda não foram publicados.
+
+Foram corrigidos bloqueio dos três seletores na thread da UI, modal de criação
+que permanecia aberto, desfazer que atravessava o ponto salvo e conflito entre
+Ctrl+K e o Monaco. Ctrl+K abre a paleta também no editor; F1 → **Show or Focus
+Hover** acessa o hover por teclado. Ctrl+Shift+K continua sendo o comando de
+excluir linha do Monaco. Os 218 testes Rust e 36 JavaScript passaram, assim como
+fmt/clippy, sintaxe e build. Os 33 grupos da regressão completa também passaram,
+incluindo hover pelo menu F1, correções rápidas, auto-imports e monitor incremental.
+Evidência: `target/e2e-dialog-regression/report.json`.
+
+Esse gate cobre X11/Xvfb e as interações descritas, sem substituir homologação
+humana, IME/acentuação, acessibilidade, HiDPI ou Wayland nativo. Próximo marco:
+publicar as entregas 11–12 e confirmar os dois gates no CI remoto; depois,
+concluir a matriz manual de entrada e apresentação.
+
+## Atualização — 2026-09-27
+
+Correções rápidas e auto-imports foram publicados em `0479fbe`. O primeiro CI
+falhou por desconexão do proxy WebDriver no teste de terminal; `e7fed1b` passou
+a usar o transporte direto já validado localmente. O
+[CI de `e7fed1b`](https://github.com/w3ti/Lyrnova/actions/runs/36313326018) passou,
+incluindo as correções rápidas e os auto-imports com rust-analyzer real.
+
+Entrega 11, local: monitor Linux por eventos, cache de até 100 mil entradas,
+reconstrução das subárvores afetadas, ressincronização após overflow e modo de
+compatibilidade visível. O Explorer reutiliza o cache e não relista por mudanças
+apenas de conteúdo. Abas abertas mantêm verificação de conteúdo, rascunhos e
+conflitos. A auditoria de metadados ocorre a cada 60 segundos; fechar a janela
+ou trocar projeto libera as watches. Contrato e limites na
+[ADR-0027](../architecture/ADR-0027-incremental-workspace-monitor.md).
+
+Validação local: 218 testes Rust (206 unitários + 12 de fronteira), um opcional
+ignorado, 36 testes JavaScript, fmt/clippy/sintaxe e build aprovados. Os 33 grupos
+da jornada nativa passaram, incluindo o cenário de 6 mil arquivos e todos os
+recursos Rust anteriores. Evidência: `target/e2e-incremental/report.json`.
+O harness espera o foco do Monaco estabilizar antes de digitar; a entrada continua
+via handlers DOM. Esta entrega 11 ainda não foi publicada nem executada no CI
+remoto. Próximo item sugerido: homologação manual de teclado/mouse e diálogos.
+
 ## Atualização local — 2026-09-25
 
 O HEAD publicado é `af79332`, contendo as entregas 1–9 abaixo. O

@@ -2441,6 +2441,8 @@ async function saveDocument() {
     setEditorError("Rascunho preservado: salve uma cópia ou releia o arquivo do disco");
     return;
   }
+  // Keep typing after Save in a separate undo group from the submitted text.
+  codeEditor.pushUndoStop();
   if (!invoke) {
     savedDocuments.set(path, submittedContent);
     updateDraftState();
@@ -2888,7 +2890,9 @@ async function createProject() {
       initializeGit: newProjectGit.checked,
     });
     if (!project) return;
-    closeCreateProjectDialog();
+    // Successful creation closes the modal while the transition is still busy.
+    // The user-facing close handler deliberately refuses cancellation then.
+    projectDialog.close();
     renderProjectSummary(project);
     clearEditorWorkspace();
     sessionTransition = false;
@@ -3542,17 +3546,27 @@ document.querySelectorAll("[data-setting]").forEach((control) => {
 document.addEventListener("keydown", (event) => {
   if (event.target.closest?.(".xterm") && !(event.ctrlKey && event.key === "`")) return;
   if (event.key === "Escape") { closePalette(); appShell.dataset.sidebarOpen = "false"; }
-  if (event.ctrlKey && event.key.toLowerCase() === "k") { event.preventDefault(); openPalette(); }
-  if (event.ctrlKey && event.key === ",") { event.preventDefault(); switchActivity("settings"); }
-  if (event.ctrlKey && event.key.toLowerCase() === "n" && aiProviderEnabled) { event.preventDefault(); resetThread(); }
-  if (event.ctrlKey && event.key.toLowerCase() === "o") { event.preventDefault(); void openProjectDialog(); }
-  if (event.ctrlKey && event.key === "`") { event.preventDefault(); toggleTerminal(); }
-  if (event.ctrlKey && event.key === "1") { event.preventDefault(); showWorkspaceView("editor", true); }
-  if (event.ctrlKey && event.key === "2") { event.preventDefault(); void openDocument(activeDocument); }
-  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "e") { event.preventDefault(); switchActivity("explorer"); }
-  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "g") { event.preventDefault(); switchActivity("git"); }
-  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a" && aiProviderEnabled) { event.preventDefault(); switchActivity("agent"); }
-});
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+  const shortcuts = event.shiftKey ? {
+    e: () => switchActivity("explorer"),
+    g: () => switchActivity("git"),
+    a: aiProviderEnabled ? () => switchActivity("agent") : null,
+  } : {
+    k: openPalette,
+    ",": () => switchActivity("settings"),
+    n: aiProviderEnabled ? resetThread : null,
+    o: () => { void openProjectDialog(); },
+    "`": () => toggleTerminal(),
+    "1": () => showWorkspaceView("editor", true),
+    "2": () => { void openDocument(activeDocument); },
+  };
+  const action = shortcuts[event.key.toLowerCase()];
+  if (!action) return;
+  // Reserve only advertised application shortcuts before Monaco consumes them.
+  event.preventDefault();
+  event.stopPropagation();
+  action();
+}, true);
 
 if (narrowWorkspace.matches) toggleInspector(false);
 narrowWorkspace.addEventListener("change", (event) => {
@@ -3566,7 +3580,10 @@ workspaceMonitor = createWorkspaceMonitor({
   invoke, context: () => workspaceContext, ready: () => Boolean(currentProject && workspaceContext) && !sessionTransition && !editorRestoring,
   paths: () => [...openDocuments],
   status: (text, state) => { const node = document.querySelector("#workspace-watch-state"); if (node.textContent !== text) node.textContent = text; node.dataset.state = state; node.title = text; },
-  refresh: () => Promise.all([loadWorkspaceTree(false), loadGitStatus()]),
+  refresh: result => Promise.all([
+    result.resync || result.treeChanged ? loadWorkspaceTree(false) : fileFilter.value.trim() ? searchWorkspace() : null,
+    loadGitStatus(),
+  ]),
   invalidateRust: () => diagnosticsView?.workspaceChanged(),
   reconcile: (path, current, workspace) => reconcileDocument(path, current, {
     read: path => invoke("workspace_read_current", { workspace, path }),

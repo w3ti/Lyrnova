@@ -24,6 +24,7 @@ jobs:
           sudo apt-get install --yes \
             bubblewrap \
             libgtk-3-dev \
+            libxtst6 \
             libwebkit2gtk-4.1-dev \
             librsvg2-dev \
             patchelf \
@@ -90,11 +91,16 @@ jobs:
       - name: Native MVP journey without AI
         run: xvfb-run -a dbus-run-session -- python3 tests/e2e/native.py --direct-native --rust-analyzer "$RUNNER_TEMP/rust-analyzer" --rust-src /usr/lib/rustlib/src/rust/library
 
+      - name: OS keyboard, mouse and native file choosers
+        run: python3 tests/e2e/native_input.py --xvfb /usr/bin/Xvfb
+
       - name: Upload native test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-e2e
-          path: target/e2e/
+          path: |
+            target/e2e/
+            target/e2e-input/
           if-no-files-found: ignore
           retention-days: 14

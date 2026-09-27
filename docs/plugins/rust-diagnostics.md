@@ -14,8 +14,9 @@ a [distribuição standalone oficial](https://rust-analyzer.github.io/book/insta
    Se elas estiverem no cache do Cargo, autorize explicitamente a leitura dos
    diretórios exibidos. Clique em **Aplicar e reiniciar**.
 5. Edite o arquivo: os diagnósticos aparecem sem salvar o rascunho. Clique em um
-   resultado para navegar. Use **F12** para ir à definição e hover ou **Ctrl+K,
-   Ctrl+I** para tipos/documentação. Fontes externas abrem somente para leitura.
+   resultado para navegar. Use **F12** para ir à definição e hover ou **F1 →
+   Show or Focus Hover** para tipos/documentação. **Ctrl+K** abre a paleta do
+   Lyrnova, inclusive no editor. Fontes externas abrem somente para leitura.
 
 Com a análise ativa, os recursos de edição são:
 
@@ -40,6 +41,9 @@ Renomeação e correções rápidas preparam até 32 abas;
 o levantamento inicial das fontes limita-se a 512 arquivos Rust / 8 MiB. A lista
 de referências aceita até 256 localizações. Mudanças nas fontes ou configuração Rust dentro do projeto são detectadas
 automaticamente: a análise reinicia preservando rascunhos e o ambiente autorizado.
+O monitor usa eventos e verifica apenas caminhos afetados e abas abertas; uma
+auditoria de metadados ocorre a cada 60 segundos. Se a observação não estiver
+disponível, a interface informa o modo de compatibilidade (consultas a cada 5 s).
 Durante a reindexação, os resultados antigos são descartados. Fontes externas de
 toolchains/cache ainda exigem reinício manual.
 

@@ -66,9 +66,9 @@ handlers do xterm.js. Ele verifica visibilidade/estado dos controles e efeitos
 reais no backend, mas **não homologa mouse, teclado do SO, IME ou acessibilidade**.
 O modo de entrada é registrado no relatório; não há fallback silencioso.
 
-Abertura/criação via seletor nativo e instalação pelo seletor de pacote ainda
-exigem verificação manual: o projeto recente e o pacote são preparados pelo
-teste antes da abertura. A recuperação é testada após snapshot confirmado e após fechamento normal. Os
+Em `native.py`, o projeto recente e o pacote são preparados antes da abertura.
+A suíte complementar `native_input.py`, descrita abaixo, exercita os seletores
+nativos e a entrada do SO em uma tela isolada. A recuperação é testada após snapshot confirmado e após fechamento normal. Os
 prompts de copiar/descartar usam respostas injetadas no harness DOM. Comandos que deliberadamente criam outra
 sessão de processos, crash forçado do host, Wayland nativo, grandes projetos e
 outras plataformas continuam fora deste gate. A suíte complementa os testes
@@ -99,7 +99,7 @@ com um `rust-analyzer.toml` que tenta habilitá-lo. Isso não certifica toolchai
 dependências externas, biblioteca padrão, projetos grandes ou todas as configurações.
 
 A análise requer Cargo e rustc da distribuição em `/usr/bin`, visíveis no sandbox.
-A jornada Rust também cobre hover pelo Monaco (Ctrl+K, Ctrl+I), conteúdo inerte
+A jornada Rust também cobre hover pelo Monaco (F1 → **Show or Focus Hover**), conteúdo inerte
 e F12 abrindo a definição em uma aba ainda não carregada. Testes de concorrência
 e cancelamento dos providers podem ser executados com `npm test --prefix ui`.
 
@@ -136,9 +136,57 @@ Se a combinação local de tauri-driver/WebKitWebDriver encerrar conexões no pr
 envia comandos da sessão diretamente à porta nativa. O relatório registra
 `commandTransport`; não há retry implícito de clicks/comandos que poderiam ter
 sido executados antes de perder a resposta. Esse modo exercita o mesmo binário,
-WebView e IPC reais. O modo padrão do CI permanece passando pelo proxy.
+WebView e IPC reais. O CI também usa o modo direto desde `e7fed1b`, após a mesma desconexão ocorrer
+no runner Ubuntu. Nenhuma ação é repetida implicitamente ao perder uma resposta.
 
 A jornada Rust também verifica auto-import via Ctrl+Espaço (símbolo e `use` em
 um único desfazer), resolução por ID opaco e correção rápida via Ctrl+.
 O arquivo em disco precisa permanecer inalterado após ambas as ações; apenas
 os rascunhos recebem as edições. Atalhos continuam acionados pelos handlers DOM.
+
+
+## Monitor incremental e projetos maiores
+
+A jornada cria uma árvore de 6 mil arquivos fora do projeto e a move para dentro.
+Verifica observação por eventos, listagem completa, recarga de aba limpa sem
+reconstruir a árvore do Explorer, preservação de rascunho, rename e remoção da pasta.
+O cenário é removido antes de continuar os testes Rust. Os testes de backend
+usam 12 mil arquivos e contadores de inspeção, além de overflow e quota de watches.
+Evidência local: `target/e2e-incremental/report.json`.
+
+## Teclado, mouse e seletores GTK
+
+`native_input.py` usa XTest (`libX11` e `libXtst`) para enviar teclas e cliques ao
+servidor X11. WebDriver somente lê estado e geometria do DOM; não aciona handlers,
+injeta texto, responde prompts ou chama IPC. A execução começa sem projeto
+recente nem plugin instalado no perfil da aplicação. O pacote de teste é gerado
+em outro perfil e selecionado pelo diálogo real, junto do descritor SHA-256.
+Favoritos GTK apontam apenas às pastas da fixture; a seleção das pastas usa
+Alt+1…4 e Enter no diálogo real, e a seleção do pacote usa seu campo de localização.
+
+```bash
+# Dependências adicionais no Debian/Ubuntu: xvfb libxtst6 dbus-x11
+python3 tests/e2e/native_input.py --xvfb /usr/bin/Xvfb
+# Alternativa quando o chamador já possui uma tela descartável:
+xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
+  python3 tests/e2e/native_input.py --isolated-display
+```
+
+`--xvfb` inicia um display livre sem escuta TCP, um D-Bus privado e diretórios
+temporários para configurações, dados e cache. Encerra apenas os processos do
+teste. `--isolated-display` exige que o chamador forneça uma tela descartável:
+não use essa opção na sua sessão de trabalho. Os caminhos do binário, fixture,
+drivers e evidências aceitam as mesmas opções do outro runner; o transporte dos
+comandos WebDriver é direto ao driver nativo.
+
+A jornada cobre abertura/cancelamento de pasta, criação por Tab/Enter, cancelamento
+e nova tentativa, Git inicial, fechamento do modal, edição/salvamento/desfazer,
+paleta, terminal com Ctrl+C/Ctrl+D, troca de projeto com rascunho e revisão de
+instalação de plugin. Cada seletor também exige que o WebView continue respondendo.
+O relatório fica em `target/e2e-input/report.json`, com screenshot/HTML em falhas.
+Se ImageMagick estiver disponível, a falha também captura a tela com o diálogo GTK.
+
+Esse gate cobre X11/Xvfb, layout de teclado com caracteres ASCII e os caminhos
+descritos. Não substitui homologação humana, IME/acentuação, acessibilidade,
+clipboard, arrastar e soltar, HiDPI ou Wayland nativo. A suíte DOM continua
+responsável pela matriz mais ampla de Git, Tasks, recuperação e linguagem Rust.

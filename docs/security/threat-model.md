@@ -332,3 +332,17 @@ não pode alterar a inserção original; imports adicionais são validados e res
 antes da aceitação da sugestão. Não há grant novo de escrita, comandos LSP genéricos
 ou salvamento implícito. Limites e janela de detecção de mudanças externas seguem
 as ADRs 0024–0025; detalhes na [ADR-0026](../architecture/ADR-0026-rust-quick-fixes-and-auto-imports.md).
+
+
+### Monitor incremental Linux
+
+A [ADR-0027](../architecture/ADR-0027-incremental-workspace-monitor.md) mantém
+watches de diretórios, com limites de entradas, caminhos, profundidade e fila.
+Nomes recebidos de eventos apenas selecionam caminhos relativos: as leituras
+reabrem componentes sem seguir links a partir da raiz autorizada, em vez de ler
+pelo inode observado. Pastas movidas para fora não autorizam fontes externas.
+Mudança de projeto e destruição da janela liberam a instância inotify. Overflow
+reconstrói o cache e força ressincronização; cota insuficiente libera watches
+parciais e expõe o modo de compatibilidade. Lotes inválidos preservam o snapshot
+anterior. Abas abertas mantêm hashes limitados; fontes fechadas passam a depender
+de eventos/metadados e da auditoria periódica. Nenhuma gravação é adicionada.

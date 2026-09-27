@@ -283,8 +283,22 @@ fn project_current(
 }
 
 #[tauri::command]
-fn project_open_dialog(
+async fn project_open_dialog(
     app: tauri::AppHandle,
+) -> Result<Option<ProjectSummary>, WorkspaceError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        let terminal = app.state::<TerminalService>();
+        let registry = app.state::<PluginRegistry>();
+        let plugins = app.state::<PluginLifecycleState>();
+        open_project_from_dialog(&app, state, terminal, registry, plugins)
+    })
+    .await
+    .map_err(|_| WorkspaceError::Io)?
+}
+
+fn open_project_from_dialog(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, ProjectState>,
     terminal: tauri::State<'_, TerminalService>,
     registry: tauri::State<'_, PluginRegistry>,
@@ -315,6 +329,9 @@ fn project_open_dialog(
     app.state::<LanguageService>()
         .stop()
         .map_err(|_| WorkspaceError::Io)?;
+    app.state::<workspace_watch::WorkspaceWatchService>()
+        .stop()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -322,10 +339,10 @@ fn project_open_dialog(
         .map_err(|_| WorkspaceError::Io)?;
     app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
-    remember_project(&app, project.workspace.root());
+    remember_project(app, project.workspace.root());
     *current_project = Some(project);
     drop(current_project);
-    start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
+    start_enabled_external_runtimes(app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
 
@@ -363,10 +380,34 @@ fn validated_project_name(value: &str) -> Result<&str, WorkspaceError> {
 }
 
 #[tauri::command]
-fn project_create_dialog(
+async fn project_create_dialog(
     name: String,
     initialize_git: bool,
     app: tauri::AppHandle,
+) -> Result<Option<ProjectSummary>, WorkspaceError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProjectState>();
+        let terminal = app.state::<TerminalService>();
+        let registry = app.state::<PluginRegistry>();
+        let plugins = app.state::<PluginLifecycleState>();
+        create_project_from_dialog(
+            name,
+            initialize_git,
+            &app,
+            state,
+            terminal,
+            registry,
+            plugins,
+        )
+    })
+    .await
+    .map_err(|_| WorkspaceError::Io)?
+}
+
+fn create_project_from_dialog(
+    name: String,
+    initialize_git: bool,
+    app: &tauri::AppHandle,
     state: tauri::State<'_, ProjectState>,
     terminal: tauri::State<'_, TerminalService>,
     registry: tauri::State<'_, PluginRegistry>,
@@ -419,6 +460,9 @@ fn project_create_dialog(
     app.state::<LanguageService>()
         .stop()
         .map_err(|_| WorkspaceError::Io)?;
+    app.state::<workspace_watch::WorkspaceWatchService>()
+        .stop()
+        .map_err(|_| WorkspaceError::Io)?;
     terminal.stop().map_err(|_| WorkspaceError::Io)?;
     plugins
         .runtimes
@@ -426,21 +470,27 @@ fn project_create_dialog(
         .map_err(|_| WorkspaceError::Io)?;
     app.state::<ApprovalBroker>().clear_session();
     let summary = project_summary(&project);
-    remember_project(&app, project.workspace.root());
+    remember_project(app, project.workspace.root());
     *current_project = Some(project);
     drop(current_project);
-    start_enabled_external_runtimes(&app, &registry, &plugins.runtimes, Some(&root));
+    start_enabled_external_runtimes(app, &registry, &plugins.runtimes, Some(&root));
     Ok(Some(summary))
 }
 
 #[tauri::command]
-fn workspace_list(
-    state: tauri::State<'_, ProjectState>,
-) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-    project_snapshot(&state)
-        .ok_or(WorkspaceError::NoWorkspace)?
-        .workspace
-        .list()
+async fn workspace_list(
+    app: tauri::AppHandle,
+) -> Result<Vec<WorkspaceEntry>, workspace_watch::WatchError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use workspace_watch::WatchError;
+        let state = app.state::<ProjectState>();
+        let project = state.0.read().map_err(|_| WatchError::Unavailable)?;
+        let project = project.as_ref().ok_or(WatchError::WorkspaceChanged)?;
+        app.state::<workspace_watch::WorkspaceWatchService>()
+            .list(project.workspace.root())
+    })
+    .await
+    .map_err(|_| workspace_watch::WatchError::Unavailable)?
 }
 
 #[tauri::command]
@@ -1270,8 +1320,19 @@ fn ensure_trusted_download_available(
 }
 
 #[tauri::command]
-fn plugin_package_select(
+async fn plugin_package_select(
     app: tauri::AppHandle,
+) -> Result<Option<PluginInstallReview>, PluginInstallFlowError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginLifecycleState>();
+        select_plugin_package(&app, state)
+    })
+    .await
+    .map_err(|_| PluginInstallFlowError::StateUnavailable)?
+}
+
+fn select_plugin_package(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<Option<PluginInstallReview>, PluginInstallFlowError> {
     let Some(selection) = app
@@ -1298,7 +1359,7 @@ fn plugin_package_select(
         .mutation
         .lock()
         .map_err(|_| PluginInstallFlowError::StateUnavailable)?;
-    let installer = PluginPackageInstaller::new(plugin_storage_root(&app)?, host_version);
+    let installer = PluginPackageInstaller::new(plugin_storage_root(app)?, host_version);
     let staged = installer.stage_local(&package_path, descriptor)?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let review = PluginInstallReview {
@@ -1788,6 +1849,9 @@ pub fn run() {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 let _ = window.state::<TerminalService>().stop();
                 let _ = window.state::<LanguageService>().stop();
+                let _ = window
+                    .state::<workspace_watch::WorkspaceWatchService>()
+                    .stop();
             }
         })
         .setup(|app| {

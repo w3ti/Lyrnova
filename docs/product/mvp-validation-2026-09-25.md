@@ -154,3 +154,50 @@ Ctrl+. para corrigir símbolo não resolvido e ausência de salvamento implícit
 A jornada usa rust-analyzer/rustfmt reais, perfil isolado e comandos via driver
 nativo direto; teclado/mouse do SO continuam fora dessa evidência. Esta entrega
 permanece local e ainda não foi validada no CI remoto.
+
+
+## Monitor incremental — 2026-09-27
+
+Correções rápidas e auto-imports foram publicados em `0479fbe`; após ajustar o
+transporte de testes em `e7fed1b`, o
+[CI remoto passou](https://github.com/w3ti/Lyrnova/actions/runs/36313326018).
+A entrega 11, ainda local, passou em 218 testes Rust (206 unitários + 12 de
+fronteira, um opcional ignorado), 36 testes JavaScript, fmt/clippy/sintaxe/build
+e 33 grupos nativos. `target/e2e-incremental/report.json` registra uma árvore de
+6 mil arquivos: listagem completa, aba limpa recarregada sem reconstruir o Explorer,
+rascunho preservado, renomeação e remoção da pasta. Testes de backend usam 12 mil
+arquivos e verificam trabalho incremental, recuperação de overflow e fallback por
+cota de watches. O aplicativo atualizado foi iniciado para uso na sessão gráfica.
+A entrada do harness continua via handlers DOM, aguardando estabilização do foco
+antes da digitação; teclado/mouse do SO e seletores nativos continuam pendentes.
+
+## Entrada do SO e seletores GTK — 2026-09-27
+
+A entrega 12 acrescenta `native_input.py`. Seus seis grupos passaram usando
+eventos XTest no servidor X11, com binário real, Xvfb privado, D-Bus e perfis
+temporários. WebDriver somente observa estado/geometria; nenhum clique, texto,
+prompt ou comando IPC é injetado por ele nessa suíte. Os favoritos GTK pertencem
+à fixture e são selecionados por atalhos do SO no diálogo real.
+
+Foram verificados cancelamento e aceitação dos seletores, Tab/Enter na criação,
+Git inicializado, fechamento do modal, cliques no editor, digitação, Ctrl+S/Z,
+Ctrl+K/Escape, preservação de Ctrl+Shift+K do Monaco, terminal com Ctrl+C/D,
+troca de projeto com espaços no nome e recuperação do rascunho. O pacote local
+é escolhido pelo diálogo GTK e passa por cancelamento de revisão, recusa sem
+todas as permissões e confirmação explícita, permanecendo desabilitado.
+
+O teste encontrou e motivou quatro correções: seletores bloqueantes saem da
+thread da interface; criação bem-sucedida fecha o modal; salvar separa os grupos
+de desfazer; atalhos documentados do aplicativo têm prioridade no editor. O hover
+por teclado usa F1 → **Show or Focus Hover**, pois Ctrl+K pertence à paleta.
+O WebView também precisa continuar respondendo enquanto cada seletor está aberto.
+
+Evidência: `target/e2e-input/report.json`. Os 33 grupos da regressão completa com
+Rust também passaram em `target/e2e-dialog-regression/report.json`, incluindo
+hover pelo menu F1, correções rápidas, auto-imports e monitor incremental.
+Passaram 218 testes Rust (um opcional ignorado), 36 JavaScript,
+fmt/clippy/sintaxe e build. O workflow passa a incluir
+essa suíte e seus artefatos; execução remota das entregas 11–12 ainda pendente.
+Esta evidência cobre X11/Xvfb e entrada ASCII nos cenários listados. Homologação
+humana, IME/acentuação, acessibilidade, clipboard, arrastar/soltar, HiDPI e
+Wayland nativo continuam pendentes; o MVP global ainda não está homologado.
