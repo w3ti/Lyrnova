@@ -171,14 +171,24 @@ impl TerminalService {
             return Err(TerminalError::InvalidInput);
         }
         self.with_session(session_id, |session| {
-            session
-                .pending_input
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    current
-                        .checked_add(input.len())
-                        .filter(|next| *next <= MAX_PENDING_INPUT)
-                })
-                .map_err(|_| TerminalError::Busy)?;
+            // Explicit CAS loop: `fetch_update` is deprecated on newer stable
+            // toolchains, while its `try_update` replacement exceeds the MSRV.
+            let mut current = session.pending_input.load(Ordering::Acquire);
+            loop {
+                let next = current
+                    .checked_add(input.len())
+                    .filter(|next| *next <= MAX_PENDING_INPUT)
+                    .ok_or(TerminalError::Busy)?;
+                match session.pending_input.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => current = actual,
+                }
+            }
             if session
                 .commands
                 .try_send(TerminalCommand::Input(input.to_vec()))
