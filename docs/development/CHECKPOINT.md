@@ -1,5 +1,59 @@
 # Checkpoint de desenvolvimento
 
+## Ponto de retomada — pausa solicitada em 2026-10-02
+
+Próxima entrega em andamento: **executar um teste Rust individual** (#39).
+Nenhum código desta entrega foi escrito; `main` está limpo em `8cd5d69`
+([CI aprovado](https://github.com/w3ti/Lyrnova/actions/runs/37062932392)).
+A alteração local de uma linha em `docs/architecture/ADR-0001-rust-tauri.md`
+continua fora dos commits, como antes.
+
+Estado publicado nesta sessão: tarefas Cargo (ADR-0028), erros do Cargo
+navegáveis no painel Problemas, gate de entrada em 200% no CI, reconciliação das
+16 issues e remoção dos três botões “•••” sem função. Validação: 225 testes Rust,
+37 JavaScript, 35 grupos nativos e 11 de entrada do SO.
+
+### Formato confirmado do rust-analyzer 2026-09-21
+
+`experimental.runnables` é anunciado como `{"kinds":["cargo"]}`. Com
+`experimental/runnables` e `position: null`, cada item traz `label`
+(`test tests::adds`, `test-mod tests`, `cargo check ...`), `location.targetRange`
+e `args`:
+
+- teste unitário: `cargoArgs: ["test","--package","probe","--lib"]`,
+  `executableArgs: ["tests::adds","--exact","--nocapture","--include-ignored"]`;
+- módulo: `executableArgs: ["tests","--nocapture"]` (sem `--exact`);
+- teste de integração: `cargoArgs: [..., "--test","it"]`, arquivo inteiro com
+  filtro vazio `""`;
+- também vêm `environment`, `cwd`, `workspaceRoot` e `overrideCargo` (ignorar;
+  recusar se `overrideCargo` não for nulo). Itens `cargo check/test --all-targets`
+  não têm range e devem ser descartados.
+
+### Desenho decidido
+
+1. `query.rs`: `QueryKind::Runnables` → `experimental/runnables` com
+   `position: null`; capability `caps.experimental.runnables` em `runtime.rs`.
+2. Não confiar no argv do servidor. Extrair só pacote, alvo (`--lib`,
+   `--bin N`, `--test N`, `--example N`) e caminho do teste; validar nomes
+   (`[A-Za-z0-9_-]`, segmentos `ident` unidos por `::`) e montar o argv:
+   `cargo test --offline --locked --message-format=json --package P <alvo> --
+   <caminho> [--exact --include-ignored]`.
+3. Resultado ao frontend com **id opaco** por teste (como `resolveId` de
+   completion): `Queries` guarda `{run, revisão, validade}`, limpo a cada consulta
+   e no `stop`; range validado no documento e `targetUri` igual ao da consulta.
+4. Comando Tauri `rust_test_review(sessionId, runId)` → `TaskReview` pelo
+   `TaskBroker::review_builtin` com `rust_task_provider`; execução, saída,
+   cancelamento e diagnósticos reaproveitam `task_execute` e a seção Cargo.
+5. Frontend: CodeLens do Monaco “▷ Executar teste” / “▷ Executar testes do módulo”
+   sobre cada runnable; extrair de `showTaskReview` uma função que apresenta um
+   `TaskReview` já obtido.
+6. Testes: parser/validação no `cargo.rs`, id opaco expirado/obsoleto em
+   `query.rs`, e na jornada nativa clicar no CodeLens de um teste e confirmar
+   `1 passed` com `--exact`.
+
+A sonda usada fica em `/tmp/claude-1001/ra-probe/probe.py` (pode não sobreviver
+a reinício); o rust-analyzer fixado está em `/tmp/lyrnova-lsp-tools`.
+
 ## Tarefas Cargo (#39) — 2026-10-02
 
 Primeira entrega da trilha Rust após a reconciliação do backlog: `cargo check`,
