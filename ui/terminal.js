@@ -118,9 +118,16 @@ export function createTerminalView(element, invoke, listen) {
   term.onData(data => queueInput(encoder.encode(data)));
   term.onBinary(data => queueInput(Uint8Array.from(data, character => character.charCodeAt(0))));
   term.attachCustomKeyEventHandler(event => {
-    // Keep copy distinct from Ctrl+C (interrupt). Let the browser handle
-    // Ctrl+Shift+C/V and let the IDE handle its terminal toggle shortcut.
-    if (event.ctrlKey && (event.key === "`" || (event.shiftKey && ["c", "v"].includes(event.key.toLowerCase())))) return false;
+    // WebKit does not bind Ctrl+Shift+C to Copy. Run its copy command only
+    // from this user gesture; xterm's copy listener supplies the selection.
+    // OSC 52 remains disabled, and Ctrl+C still reaches the PTY as interrupt.
+    if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "c") {
+      if (event.type === "keydown" && term.hasSelection()) document.execCommand("copy");
+      event.preventDefault();
+      return false;
+    }
+    // Let the browser handle paste and the IDE handle its terminal toggle.
+    if (event.ctrlKey && (event.key === "`" || (event.shiftKey && event.key.toLowerCase() === "v"))) return false;
     return true;
   });
 

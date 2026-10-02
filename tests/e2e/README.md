@@ -165,8 +165,11 @@ Favoritos GTK apontam apenas às pastas da fixture; a seleção das pastas usa
 Alt+1…4 e Enter no diálogo real, e a seleção do pacote usa seu campo de localização.
 
 ```bash
-# Dependências adicionais no Debian/Ubuntu: xvfb libxtst6 dbus-x11
+# Dependências adicionais no Debian/Ubuntu:
+# xvfb libxtst6 dbus-x11 python3-gi gir1.2-gtk-3.0
 python3 tests/e2e/native_input.py --xvfb /usr/bin/Xvfb
+# Escala inteira GTK de 200%, com tela física ampliada:
+python3 tests/e2e/native_input.py --xvfb /usr/bin/Xvfb --scale 2 --output target/e2e-input-2x
 # Alternativa quando o chamador já possui uma tela descartável:
 xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
   python3 tests/e2e/native_input.py --isolated-display
@@ -186,7 +189,22 @@ instalação de plugin. Cada seletor também exige que o WebView continue respon
 O relatório fica em `target/e2e-input/report.json`, com screenshot/HTML em falhas.
 Se ImageMagick estiver disponível, a falha também captura a tela com o diálogo GTK.
 
-Esse gate cobre X11/Xvfb, layout de teclado com caracteres ASCII e os caminhos
-descritos. Não substitui homologação humana, IME/acentuação, acessibilidade,
-clipboard, arrastar e soltar, HiDPI ou Wayland nativo. A suíte DOM continua
-responsável pela matriz mais ampla de Git, Tasks, recuperação e linguagem Rust.
+O gate também envia teclas mortas (agudo, til e circunflexo) e cedilha pelo XTest,
+confere os bytes UTF-8 salvos e troca texto com um editor GTK em outro processo.
+`clipboard_peer.py` usa `/usr/bin/python3` e PyGObject da distribuição; copiar e
+colar passam pelos atalhos normais do GTK. O texto inclui acentos, emoji, grego,
+japonês e quebras de linha. A presença de japonês no clipboard não testa um IME.
+No terminal, Ctrl+Shift+V cola sem executar até Enter e Ctrl+Shift+C copia uma
+linha selecionada por mouse para o editor externo; Ctrl+C ainda interrompe jobs.
+
+Tab/Shift+Tab devem ficar dentro da paleta, com foco visível; Ctrl+K repetido e
+Escape restauram o editor. Comandos da paleta transferem foco ao novo diálogo,
+atalhos globais não escapam desse modal e fechar o terminal focado restaura o
+editor. O mapa de quatro teclas, clipboard e perfis pertencem à tela descartável.
+
+Esse gate cobre X11/Xvfb e escalas inteiras GTK (`--scale 1` ou `2`), não escala
+fracionária de compositor. Não substitui homologação humana, IBus/Fcitx e seleção
+de candidatos, leitor de tela, arrastar e soltar ou Wayland nativo. Consulte a
+[matriz de desktop](../../docs/product/desktop-validation-2026-09-27.md) para
+os aceites restantes. A suíte DOM continua responsável pela matriz mais ampla
+de Git, Tasks, recuperação e linguagem Rust.

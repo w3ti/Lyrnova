@@ -1,5 +1,12 @@
 # Validação nativa do MVP — 2026-09-25
 
+Atualização em 2026-09-27: entregas 11–12 publicadas em `adc0b4c`, com
+[CI aprovado](https://github.com/w3ti/Lyrnova/actions/runs/36316630535).
+A entrega 13 local amplia a entrada do SO para acentuação, clipboard entre
+aplicações e foco modal. A [matriz de desktop](desktop-validation-2026-09-27.md)
+registra os cenários e limites atuais. Publicações pendentes citadas abaixo são
+históricas; a homologação humana e a matriz completa de ambientes permanecem abertas.
+
 Atualização: o [CI de `af79332`](https://github.com/w3ti/Lyrnova/actions/runs/36177855431)
 passou, incluindo a jornada nativa das entregas 1–9. Isso supera as indicações
 históricas de CI pendente abaixo. A homologação manual de teclado/mouse do SO,

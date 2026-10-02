@@ -352,10 +352,10 @@
       <div class="project-dialog-actions"><button class="secondary-button" type="button" data-action="cancel-git-review">Cancelar</button><button class="secondary-button" id="git-review-reload" type="button" data-action="reload-git-review" hidden>Revisar novamente</button><button class="accent-button" id="git-review-confirm" type="button" data-action="confirm-git-commit" disabled>Confirmar commit</button></div>
     </dialog>
 
-    <div class="palette-backdrop" id="command-palette" hidden>
-      <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="palette-title">
+    <dialog class="palette-backdrop" id="command-palette" aria-labelledby="palette-title" hidden>
+      <section class="command-palette">
         <h2 class="visually-hidden" id="palette-title">Paleta de comandos</h2>
-        <label><span aria-hidden="true">⌕</span><input id="palette-input" type="search" placeholder="Buscar projetos, arquivos e comandos"></label>
+        <label><span aria-hidden="true">⌕</span><input id="palette-input" type="search" aria-label="Buscar projetos, arquivos e comandos" placeholder="Buscar projetos, arquivos e comandos"></label>
         <p>Comandos sugeridos</p>
         <button class="ai-plugin-control" type="button" data-command="new-thread" hidden><span>＋</span><strong>Nova conversa</strong></button>
         <button type="button" data-command="open-project"><span>▱</span><strong>Abrir projeto</strong><kbd>Ctrl O</kbd></button>
@@ -366,7 +366,7 @@
         <button type="button" data-command="open-settings"><span>⚙</span><strong>Abrir configurações</strong><kbd>Ctrl ,</kbd></button>
         <button class="ai-plugin-control" type="button" data-command="open-account" hidden><span>↗</span><strong>Conta do provider</strong></button>
       </section>
-    </div>
+    </dialog>
 
     <dialog class="account-dialog" id="account-dialog" aria-labelledby="account-title">
       <div class="dialog-heading">

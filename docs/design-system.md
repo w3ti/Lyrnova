@@ -82,7 +82,8 @@ No shell Tauri de debug, explorer e editor leem e salvam arquivos UTF-8
 existentes dentro da raiz autorizada. No navegador estático, fixtures em memória
 mantêm o protótipo navegável. No aplicativo desktop, o terminal executa comandos
 reais em um PTY Linux com `/bin/bash -i` e xterm.js: ANSI, Unicode, resize,
-Ctrl+C e Ctrl+D. A fonte do terminal continua configurável. O botão `+` reinicia
+Ctrl+C e Ctrl+D. Ctrl+Shift+C copia a seleção do terminal; Ctrl+Shift+V cola o
+clipboard. A fonte do terminal continua configurável. O botão `+` reinicia
 a sessão atual; ocultar o painel preserva o shell. Tasks de plugins passam pelo broker de processos e por revisão
 explícita. O agente é opcional e só fica disponível com um provider autorizado.
 
@@ -95,6 +96,12 @@ Com a análise Rust ativada, F12 abre a definição em uma aba do projeto. Hover
 mostra tipos/documentação como texto inerte e também pode ser aberto por
 F1 → **Show or Focus Hover**. Ctrl+K abre a paleta do Lyrnova inclusive no editor;
 os demais atalhos do Monaco, como Ctrl+Shift+K, continuam disponíveis.
+
+A paleta usa um diálogo modal: Tab/Shift+Tab ficam entre seus controles, o foco
+é visível e Escape retorna ao elemento de origem mesmo após Ctrl+K repetido.
+Executar um comando fecha a paleta antes de focar o próximo painel ou diálogo.
+Atalhos globais respeitam os outros modais e a composição de texto. Ocultar o
+terminal com foco nele devolve o foco ao editor sem encerrar o shell.
 Diagnósticos aparecem como marcadores no Monaco e itens navegáveis
 no painel Problemas; editar remove os resultados obsoletos imediatamente.
 

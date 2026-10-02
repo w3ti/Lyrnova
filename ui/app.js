@@ -1078,12 +1078,15 @@ function toggleInspector(force) {
 
 function toggleTerminal(force) {
   const next = typeof force === "boolean" ? force : terminal.hidden;
+  const hadFocus = terminal.contains(document.activeElement);
   terminal.hidden = !next;
   if (next) {
     if (dockView === "terminal") {
       void startTerminal();
       window.requestAnimationFrame(() => terminalView?.focus());
     }
+  } else if (hadFocus) {
+    showWorkspaceView("editor", true);
   }
   document.querySelectorAll('[data-action="toggle-terminal"]').forEach((button) => button.setAttribute("aria-pressed", String(next)));
   announce(next ? "Terminal aberto" : "Terminal fechado");
@@ -1437,17 +1440,23 @@ function bindPanelResizers() {
 }
 
 function openPalette() {
-  previousFocus = document.activeElement;
+  if (palette.open) return;
   palette.hidden = false;
   paletteInput.value = "";
+  palette.showModal();
   paletteInput.focus();
 }
 
 function closePalette() {
   if (palette.hidden) return;
+  palette.close();
   palette.hidden = true;
-  previousFocus?.focus();
 }
+
+palette.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closePalette();
+});
 
 function openAccount() {
   if (!aiProviderEnabled) {
@@ -3440,6 +3449,9 @@ document.addEventListener("click", (event) => {
 
   const command = event.target.closest("[data-command]");
   if (command) {
+    // Restore the invoker before the command opens another dialog or focuses
+    // a panel, so closing the palette cannot steal that command's focus.
+    closePalette();
     if (command.dataset.command === "new-thread") resetThread();
     if (command.dataset.command === "toggle-terminal") toggleTerminal();
     if (command.dataset.command === "show-changes") showChanges();
@@ -3448,7 +3460,6 @@ document.addEventListener("click", (event) => {
     if (command.dataset.command === "open-project") void openProjectDialog();
     if (command.dataset.command === "create-project") openCreateProjectDialog();
     if (command.dataset.command === "open-settings") switchActivity("settings");
-    closePalette();
   }
 
   const login = event.target.closest("[data-login]");
@@ -3545,8 +3556,10 @@ document.querySelectorAll("[data-setting]").forEach((control) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.target.closest?.(".xterm") && !(event.ctrlKey && event.key === "`")) return;
+  if (event.isComposing) return;
+  if (document.querySelector("dialog[open]") && !palette.open) return;
   if (event.key === "Escape") { closePalette(); appShell.dataset.sidebarOpen = "false"; }
-  if (!event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+  if (!event.ctrlKey || event.altKey || event.metaKey) return;
   const shortcuts = event.shiftKey ? {
     e: () => switchActivity("explorer"),
     g: () => switchActivity("git"),
@@ -3565,6 +3578,7 @@ document.addEventListener("keydown", (event) => {
   // Reserve only advertised application shortcuts before Monaco consumes them.
   event.preventDefault();
   event.stopPropagation();
+  if (palette.open && event.key.toLowerCase() !== "k") closePalette();
   action();
 }, true);
 

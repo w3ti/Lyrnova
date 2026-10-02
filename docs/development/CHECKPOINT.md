@@ -1,5 +1,101 @@
 # Checkpoint de desenvolvimento
 
+## Retomada — 2026-10-02
+
+A investigação pendente da pausa foi concluída; supera a "próxima ação" abaixo.
+
+- Causa da falha em 200%: `clipboard_peer.py` fixava só `Gtk 3.0`; com o typelib
+  do GTK 4 presente, `Gdk` carregava 4.0 e a importação falhava. A mensagem
+  `A connection to the bus can't be made` no log não era a causa. O peer agora
+  fixa `Gdk 3.0`, e o log dele vai para `clipboardPeerLog` no relatório.
+- A verificação de overflow dava falso positivo de 1 px com o DPR fracionário do
+  Xvfb (1,042/2,083; layout de 1382,4 CSS px). Agora compara com a largura
+  fracionária do layout e lista elementos excedentes.
+- Suíte de entrada com o harness final: 11 grupos em 100% e em 200% passaram
+  (`target/e2e-desktop*/report.json`). Matriz atualizada em
+  [desktop-validation](../product/desktop-validation-2026-09-27.md).
+- Ainda pendente: regressão completa de 33 grupos (requer reinstalar
+  `/tmp/lyrnova-lsp-tools`), commit/push da entrega 13, CI remoto e, depois disso,
+  o gate de 200% no workflow.
+
+## Ponto de retomada — pausa solicitada em 2026-09-27
+
+Usuário pediu para guardar a posição e continuar depois. Trabalho interrompido
+na entrega 13: acentuação, clipboard, foco e validação de escala.
+
+- Último commit remoto: `adc0b4c90873faf729438fe0e02d9c61d76b6349`, `main`,
+  [CI aprovado](https://github.com/w3ti/Lyrnova/actions/runs/36316630535).
+- Alterações da entrega 13 estão **locais, sem commit/push**. Preservar a mudança
+  preexistente de uma linha em branco em `docs/architecture/ADR-0001-rust-tauri.md`;
+  ela não pertence a esta entrega.
+- Correções de produção: paleta em `<dialog>` com Tab/Shift+Tab contidos e foco
+  restaurado; comandos fecham a paleta antes de focar destino; atalhos globais
+  respeitam outros modais/composição; fechar terminal focado retorna ao editor;
+  Ctrl+Shift+C usa o comando de cópia do WebKit e a seleção do xterm.
+- Passaram: sintaxe, 36 testes JS, builds frontend/Rust e regressão nativa completa
+  com 33 grupos (`target/e2e-dialog-regression/report.json`). Nenhum Rust de
+  produção foi alterado nesta entrega.
+- A suíte de entrada passou em 100%, com 11 grupos, no relatório
+  `target/e2e-desktop/report.json`, iniciado em `2026-09-27T11:51:55Z`.
+  Isso inclui acentos, clipboard GTK ↔ Monaco, clipboard do terminal nos dois
+  sentidos, Ctrl+C/D, foco, projetos e revisão de plugins.
+- **O harness foi alterado depois desse sucesso e precisa ser revalidado.**
+  Foram acrescentados `--scale 1/2`, métricas de apresentação e observação do
+  clipboard pelo peer GTK, para aguardar processamento antes de trocar foco.
+- Em 200%, uma primeira execução perdeu o final da digitação ao mudar o foco
+  cedo demais. Após acrescentar sincronização/observação, a execução mais recente
+  falhou antes da cópia: `Timed out: external GTK clipboard peer`, após quatro
+  grupos. Evidência: `target/e2e-desktop-2x/report.json`, início
+  `2026-09-27T11:54:30Z`; log `/tmp/lyrnova-desktop-input-2x.log`.
+  Não considerar 200% aprovado.
+- Próxima ação: diagnosticar a inicialização de `tests/e2e/clipboard_peer.py`.
+  Ele passou a receber três caminhos (texto inicial, buffer observado, clipboard
+  observado) e importar Gdk/Gtk. Capturar seu stderr antes de remover o diretório
+  temporário; atualmente `clipboard-peer.log` fica na fixture temporária e não é
+  preservado. Verificar também a nova callback de `owner-change`/`request_text`.
+  Depois repetir a suíte em 100% e 200%, revisar evidência visual e atualizar
+  `docs/product/desktop-validation-2026-09-27.md`.
+- CI recebeu dependências `python3-gi` e `gir1.2-gtk-3.0`. O peer usa
+  `/usr/bin/python3`; o workflow ainda executa somente a escala padrão. Adicionar
+  o gate 200% apenas depois de validá-lo. Nenhum CI novo foi executado.
+- Wayland nativo, escala fracionária 150%, IBus/Fcitx com candidatos, leitor de
+  tela e arrastar/soltar continuam pendentes. Não declarar homologação global.
+
+Comando local para retomar (usar tela gráfica isolada, com permissão apropriada):
+
+```bash
+python3 tests/e2e/native_input.py \
+  --xvfb /tmp/lyrnova-xvfb/usr/bin/Xvfb \
+  --driver /tmp/lyrnova-e2e-tools/bin/tauri-driver \
+  --native-driver /tmp/lyrnova-e2e-tools/bin/WebKitWebDriver \
+  --scale 2 --output target/e2e-desktop-2x
+```
+
+Para 100%, usar `--scale 1 --output target/e2e-desktop`. O binário em
+`target/debug/lyrnova` já contém as correções de produção. Se alterar UI novamente,
+executar `npm run build --prefix ui` antes de `cargo build -p lyrnova --bin lyrnova
+--example e2e_fixture --offline --locked`. O wrapper local
+`/tmp/lyrnova-dialog-regression.py` executa a regressão completa isolada, com
+rust-analyzer em `/tmp/lyrnova-lsp-tools` e as ferramentas WebDriver acima.
+Arquivos `/tmp` podem não sobreviver a reinício. Todos os testes desta rodada
+encerraram; não ficou teste em andamento na pausa.
+
+## Entrada, clipboard e foco — 2026-09-27
+
+As entregas 11–12 foram publicadas em `adc0b4c` e passaram no
+[CI remoto](https://github.com/w3ti/Lyrnova/actions/runs/36316630535), incluindo
+as duas jornadas. Isso supera as indicações históricas de publicação pendente.
+
+Entrega 13 local: teclas mortas e cedilha, clipboard Unicode com um editor GTK
+externo, cópia/colagem do terminal e navegação de foco ampliam a suíte para 11
+grupos. Foram corrigidos escape de Tab da paleta, restauração de foco e
+Ctrl+Shift+C no terminal. Paleta usa `<dialog>`; atalhos globais respeitam os
+outros modais. Regressão completa com 33 grupos e 36 testes JavaScript passou.
+Detalhes, evidência e aceites restantes na
+[matriz de desktop](../product/desktop-validation-2026-09-27.md).
+Esta entrega ainda não foi publicada; Wayland, IME completo e leitor de tela
+continuam exigindo homologação própria.
+
 ## Publicação das entregas 11–12 — 2026-09-27
 
 Este conjunto reúne o monitor incremental e as correções de entrada e diálogos.

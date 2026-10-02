@@ -2,16 +2,20 @@
 
 Atualização em 2026-09-27: correções rápidas e auto-imports publicados e validados
 no [CI de `e7fed1b`](https://github.com/w3ti/Lyrnova/actions/runs/36313326018).
-A entrega 11 local acrescenta monitor por eventos para até 100 mil entradas,
+A entrega 11 acrescenta monitor por eventos para até 100 mil entradas,
 cache compartilhado com o Explorer e ressincronização após perda de eventos.
 Busca de conteúdo, preparação de edições Rust e renderização da árvore ainda têm
 limites próprios; detalhes na [ADR-0027](../architecture/ADR-0027-incremental-workspace-monitor.md).
 
-A entrega 12 local acrescenta seis grupos de validação por eventos do SO em
+A entrega 12 acrescenta seis grupos de validação por eventos do SO em
 Xvfb: seletores GTK, criação/troca de projeto, edição, terminal e instalação com
 revisão. Corrige bloqueio dos seletores, fechamento do modal, limite de desfazer
-no salvamento e Ctrl+K dentro do Monaco. CI ampliado, ainda sem publicação;
-homologação humana, IME, acessibilidade, HiDPI e Wayland nativo seguem pendentes.
+no salvamento e Ctrl+K dentro do Monaco. Ambas foram publicadas em `adc0b4c`, com
+[CI aprovado](https://github.com/w3ti/Lyrnova/actions/runs/36316630535).
+A entrega 13 local amplia a suíte para acentuação, clipboard com outra aplicação
+e foco modal; corrige Tab na paleta e Ctrl+Shift+C no terminal. Consulte a
+[matriz de desktop](desktop-validation-2026-09-27.md) para separar cenários
+validados de IME completo, leitor de tela e Wayland ainda pendentes.
 
 
 Atualização após o levantamento: a primeira entrega foi implementada localmente,
