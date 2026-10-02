@@ -14,9 +14,16 @@ A investigação pendente da pausa foi concluída; supera a "próxima ação" ab
 - Suíte de entrada com o harness final: 11 grupos em 100% e em 200% passaram
   (`target/e2e-desktop*/report.json`). Matriz atualizada em
   [desktop-validation](../product/desktop-validation-2026-09-27.md).
-- Ainda pendente: regressão completa de 33 grupos (requer reinstalar
-  `/tmp/lyrnova-lsp-tools`), commit/push da entrega 13, CI remoto e, depois disso,
-  o gate de 200% no workflow.
+- Regressão completa local: 33 grupos com rust-analyzer real (reinstalado da
+  release fixada no workflow, SHA-256 conferido).
+- Entrega 13 publicada em `4f4aefc`. O CI expôs dois problemas independentes:
+  clippy estável novo nega `AtomicUsize::fetch_update` (deprecated; `try_update`
+  excede o MSRV 1.85), corrigido com laço `compare_exchange_weak` em `a7d59f1`;
+  e consulta de referências Rust vazia durante reanálise, agora aguardada em
+  `3d68703`. [CI de `3d68703`](https://github.com/w3ti/Lyrnova/actions/runs/37040056451)
+  aprovado com as duas jornadas.
+- Próximo: adicionar o gate de 200% ao workflow; depois reconciliar o backlog
+  (triagem de 25/09 anterior às entregas 1–13).
 
 ## Ponto de retomada — pausa solicitada em 2026-09-27
 
