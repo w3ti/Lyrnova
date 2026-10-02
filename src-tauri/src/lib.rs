@@ -99,7 +99,14 @@ enum TaskFlowError {
     Plugin(PluginError),
     Runtime(PluginRuntimeError),
     Task(TaskError),
+    Language(LanguageError),
     NoWorkspace,
+}
+
+impl From<LanguageError> for TaskFlowError {
+    fn from(error: LanguageError) -> Self {
+        Self::Language(error)
+    }
 }
 
 impl From<PluginError> for TaskFlowError {
@@ -195,6 +202,55 @@ fn workspace_recovery_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf,
         .app_data_dir()
         .map(|directory| directory.join("workspace-recovery"))
         .map_err(|_| WorkspaceError::RecoveryUnavailable)
+}
+
+/// Private, persistent Cargo build directory for a workspace, outside the project.
+fn cargo_target_root(
+    app: &tauri::AppHandle,
+    workspace: &std::path::Path,
+) -> Result<std::path::PathBuf, TaskFlowError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::DirBuilderExt;
+
+    let base = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| TaskFlowError::Task(TaskError::StateUnavailable))?
+        .join("cargo-target");
+    let directory = base.join(format!(
+        "{:x}",
+        Sha256::digest(workspace.as_os_str().as_encoded_bytes())
+    ));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|_| TaskFlowError::Task(TaskError::StateUnavailable))?;
+    Ok(directory)
+}
+
+fn cargo_tasks(
+    app: &tauri::AppHandle,
+    workspace: &std::path::Path,
+) -> Result<Vec<tasks::BuiltinTask>, TaskFlowError> {
+    if !workspace.join("Cargo.toml").is_file() {
+        return Ok(Vec::new());
+    }
+    let target = cargo_target_root(app, workspace)?;
+    Ok(app
+        .state::<LanguageService>()
+        .cargo_tasks(workspace, &target)?)
+}
+
+fn task_provider_for(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+) -> Result<tasks::TaskProvider, PluginError> {
+    if plugin_id == language::RUST_PLUGIN_ID {
+        registry.rust_task_provider()
+    } else {
+        registry.task_provider(plugin_id)
+    }
 }
 
 fn project_snapshot(state: &tauri::State<'_, ProjectState>) -> Option<ActiveProject> {
@@ -1568,18 +1624,40 @@ async fn terminal_stop(session_id: String, app: tauri::AppHandle) -> Result<(), 
 
 #[tauri::command]
 fn task_list(
+    app: tauri::AppHandle,
+    project: tauri::State<'_, ProjectState>,
     registry: tauri::State<'_, PluginRegistry>,
     plugins: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<TaskList, TaskFlowError> {
     let mut items = Vec::new();
+    // Cargo tasks need an approved Rust environment; without one the list omits them
+    // and the Problems panel keeps reporting why analysis is unavailable.
+    if let (Ok(provider), Some(active)) =
+        (registry.rust_task_provider(), project_snapshot(&project))
+    {
+        if let Ok(cargo) = cargo_tasks(&app, active.workspace.root()) {
+            items.extend(plugins.tasks.list_builtin(&provider, &cargo));
+        }
+    }
+    let mut failures = Vec::new();
     for provider in registry.enabled_task_providers()? {
-        let response = plugins.runtimes.request(
-            &provider.id,
-            PluginCapability::Tasks,
-            "tasks.list".into(),
-            serde_json::json!({}),
-        )?;
-        items.extend(plugins.tasks.list(&provider, response.result)?);
+        let listed = plugins
+            .runtimes
+            .request(
+                &provider.id,
+                PluginCapability::Tasks,
+                "tasks.list".into(),
+                serde_json::json!({}),
+            )
+            .map_err(TaskFlowError::from)
+            .and_then(|response| Ok(plugins.tasks.list(&provider, response.result)?));
+        match listed {
+            Ok(listed) => items.extend(listed),
+            Err(_) => failures.push(tasks::TaskProviderFailure {
+                plugin_id: provider.id,
+                plugin_name: provider.name,
+            }),
+        }
     }
     items.sort_by(|left, right| {
         left.plugin_name
@@ -1589,6 +1667,7 @@ fn task_list(
     });
     Ok(TaskList {
         items,
+        failures,
         sandbox: plugins.tasks.sandbox_diagnostic(),
     })
 }
@@ -1597,6 +1676,7 @@ fn task_list(
 fn task_review(
     plugin_id: String,
     task_id: String,
+    app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     project: tauri::State<'_, ProjectState>,
     registry: tauri::State<'_, PluginRegistry>,
@@ -1607,6 +1687,16 @@ fn task_review(
         .workspace
         .root()
         .to_owned();
+    if plugin_id == language::RUST_PLUGIN_ID {
+        let provider = registry.rust_task_provider()?;
+        let task = cargo_tasks(&app, &root)?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskError::UnknownTask)?;
+        let (review, audit) = plugins.tasks.review_builtin(&root, &provider, task)?;
+        let _ = window.emit("process-audit", audit);
+        return Ok(review);
+    }
     let provider = registry.task_provider(&plugin_id)?;
     let response = plugins.runtimes.request(
         &provider.id,
@@ -1630,7 +1720,7 @@ async fn task_execute(
     plugins: tauri::State<'_, PluginLifecycleState>,
 ) -> Result<ProcessResult, TaskFlowError> {
     let plugin_id = plugins.tasks.pending_plugin_id(&review_token)?;
-    let provider = match registry.task_provider(&plugin_id) {
+    let provider = match task_provider_for(&registry, &plugin_id) {
         Ok(provider) => provider,
         Err(error) => {
             let _ = plugins.tasks.discard(&review_token);

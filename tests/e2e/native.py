@@ -149,8 +149,8 @@ class Browser:
             }));
         """, key, key_code, ctrl)
 
-    def until(self, expression, label):
-        return wait_for(lambda: self.script(f"return ({expression});"), label)
+    def until(self, expression, label, timeout=20):
+        return wait_for(lambda: self.script(f"return ({expression});"), label, timeout)
 
     def close(self):
         if self.session:
@@ -453,6 +453,38 @@ def exercise_rust_environment(browser, workspace, report, valid):
     assert not (workspace / "build-script-executed").exists()
     browser.type('#source-editor textarea.inputarea', valid, replace=True)
     report["checks"].append("reviewed installed toolchain and offline registry cache; external definitions read-only; no lockfile or source writes")
+    exercise_cargo_tasks(browser, workspace, report, original_lock)
+
+
+def exercise_cargo_tasks(browser, workspace, report, original_lock):
+    browser.until('document.querySelector("#editor-workspace").dataset.saveState === "clean"', "saved library before Cargo task")
+    browser.click('[data-activity="tasks"]')
+    browser.click('[data-action="refresh-tasks"]')
+    browser.until('!!document.querySelector(\'[data-task-id="cargo-test"]\')', "Cargo tasks for the reviewed environment")
+    tasks = [t for t in browser.invoke("task_list")["items"] if t["pluginId"] == "io.github.w3ti.lyrnova.language.rust"]
+    assert {t["taskId"] for t in tasks} == {"cargo-check", "cargo-build", "cargo-test"}, tasks
+    assert all(t["access"] == "read_only" and not t["network"] and "fixture-toolchain" in t["detail"] for t in tasks), tasks
+    browser.click('[data-task-id="cargo-test"]')
+    browser.until('document.querySelector("#task-review-dialog").open', "Cargo task review")
+    review = browser.script('return document.querySelector("#task-review-metadata").textContent')
+    assert "/tmp/target ←" in review and "/toolchain ←" in review, review
+    assert "Escrita fora do workspace" in review, review
+    assert browser.script('return document.querySelector("#task-review-command").textContent') == "cargo test --offline --locked"
+    assert "build scripts" in browser.script('return document.querySelector("#task-risk-note").textContent')
+    browser.click("#task-review-confirm")
+    # The fixture build.rs runs, as the review states, but cannot write the workspace.
+    browser.until('document.querySelector("#task-output").textContent.includes("[exited · código 101")', "hostile build script stopped", timeout=180)
+    assert "Read-only file system" in browser.script('return document.querySelector("#task-output").textContent')
+    assert not (workspace / "build-script-executed").exists(), "Cargo build script wrote into the workspace"
+    (workspace / "build.rs").unlink()
+    browser.click('[data-task-id="cargo-test"]')
+    browser.until('document.querySelector("#task-review-dialog").open', "second Cargo task review")
+    browser.click("#task-review-confirm")
+    browser.until('document.querySelector("#task-output").textContent.includes("test result: ok")', "sandboxed cargo test output", timeout=180)
+    browser.until('document.querySelector("#task-output").textContent.includes("[exited · código 0")', "cargo test exit status", timeout=60)
+    assert not (workspace / "target").exists(), "Cargo wrote build output into the workspace"
+    assert (workspace / "Cargo.lock").read_bytes() == original_lock
+    report["checks"].append("Cargo test via reviewed Task: build script denied workspace writes; fixture toolchain, offline registry dependency and private target")
 
 
 def exercise_workspace_watch(browser, workspace, report):
@@ -801,6 +833,7 @@ def exercise_rust_diagnostics(browser, workspace, report, driver_pid):
         assert "permission_denied" in str(error), str(error)
     else:
         raise AssertionError("LSP retained authority after plugin deactivation")
+    assert not any(t["pluginId"] == "io.github.w3ti.lyrnova.language.rust" for t in browser.invoke("task_list")["items"]), "Cargo tasks survived plugin deactivation"
     browser.click('[data-activity="explorer"]')
     browser.type('#source-editor textarea.inputarea', valid, replace=True)
     browser.until('document.querySelector("#editor-workspace").dataset.saveState === "clean"', "discard fixture draft by restoring saved text")
@@ -852,7 +885,7 @@ def main():
         if args.rust_analyzer:
             toolchain = root / "rustup/toolchains/fixture-toolchain"
             (toolchain / "bin").mkdir(parents=True)
-            for name in ["cargo", "rustc", "rustfmt"]:
+            for name in ["cargo", "rustc", "rustfmt", "rustdoc"]:
                 shutil.copy2(Path("/usr/bin") / name, toolchain / "bin" / name)
             if args.rust_src:
                 shutil.copytree(args.rust_src, toolchain / "lib/rustlib/src/rust/library", symlinks=True)

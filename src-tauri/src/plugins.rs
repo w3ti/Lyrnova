@@ -428,29 +428,25 @@ impl PluginRegistry {
             .state
             .read()
             .map_err(|_| PluginError::StateUnavailable)?;
-        let id = crate::language::RUST_PLUGIN_ID;
-        let plugin = catalog_plugin(&state.catalog, id)?;
-        if !plugin.manifest.source.is_bundled()
-            || !matches!(&plugin.manifest.runtime, PluginRuntime::Builtin { module } if module == "language.rust")
-            || ![PluginCapability::Lsp, PluginCapability::Diagnostics]
-                .iter()
-                .all(|c| plugin.manifest.capabilities.contains(c))
-            || state.preferences.installed.get(id) != Some(&plugin.manifest.version)
-            || !state.preferences.enabled.contains(id)
-            || !permissions_exactly_match(
-                &plugin.manifest.permissions,
-                state
-                    .preferences
-                    .grants
-                    .get(id)
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            )
-        {
-            return Err(PluginError::PermissionDenied);
-        }
+        authorized_rust_plugin(
+            &state,
+            &[PluginCapability::Lsp, PluginCapability::Diagnostics],
+        )?;
         Ok(())
+    }
+
+    /// The bundled Rust plugin as a provider of core-defined Cargo tasks.
+    pub fn rust_task_provider(&self) -> Result<TaskProvider, PluginError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PluginError::StateUnavailable)?;
+        let plugin = authorized_rust_plugin(&state, &[PluginCapability::Tasks])?;
+        Ok(TaskProvider {
+            id: plugin.manifest.id.clone(),
+            name: plugin.manifest.name.clone(),
+            permissions: plugin.manifest.permissions.iter().copied().collect(),
+        })
     }
 
     pub fn external_runtime_spec(
@@ -832,6 +828,35 @@ fn external_runtime_spec(
         capabilities: plugin.manifest.capabilities.iter().copied().collect(),
         permissions: granted,
     }))
+}
+
+fn authorized_rust_plugin<'a>(
+    state: &'a PluginRegistryState,
+    capabilities: &[PluginCapability],
+) -> Result<&'a CatalogPlugin, PluginError> {
+    let id = crate::language::RUST_PLUGIN_ID;
+    let plugin = catalog_plugin(&state.catalog, id)?;
+    if !plugin.manifest.source.is_bundled()
+        || !matches!(&plugin.manifest.runtime, PluginRuntime::Builtin { module } if module == "language.rust")
+        || !capabilities
+            .iter()
+            .all(|c| plugin.manifest.capabilities.contains(c))
+        || state.preferences.installed.get(id) != Some(&plugin.manifest.version)
+        || !state.preferences.enabled.contains(id)
+        || !permissions_exactly_match(
+            &plugin.manifest.permissions,
+            state
+                .preferences
+                .grants
+                .get(id)
+                .into_iter()
+                .flatten()
+                .copied(),
+        )
+    {
+        return Err(PluginError::PermissionDenied);
+    }
+    Ok(plugin)
 }
 
 fn task_provider(state: &PluginRegistryState, id: &str) -> Result<TaskProvider, PluginError> {
@@ -1636,7 +1661,7 @@ mod tests {
             migrated
                 .installed
                 .get("io.github.w3ti.lyrnova.language.rust"),
-            Some(&Version::new(0, 1, 1))
+            Some(&Version::new(0, 1, 2))
         );
         assert!(
             !migrated

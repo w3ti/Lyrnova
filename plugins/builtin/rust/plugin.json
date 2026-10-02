@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "io.github.w3ti.lyrnova.language.rust",
   "name": "Rust",
-  "description": "Rust local: diagnósticos, autocomplete, definição, hover, referências, renomeação e formatação.",
-  "version": "0.1.1",
+  "description": "Rust local: diagnósticos, autocomplete, definição, hover, referências, renomeação, formatação e tarefas Cargo.",
+  "version": "0.1.2",
   "publisher": "w3ti",
   "license": "GPL-3.0-only",
   "kind": "language",
@@ -25,7 +25,8 @@
     "snippets",
     "templates",
     "lsp",
-    "diagnostics"
+    "diagnostics",
+    "tasks"
   ],
   "permissions": [
     "workspace_read",

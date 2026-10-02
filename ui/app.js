@@ -1188,6 +1188,7 @@ function taskFlowErrorMessage(error) {
   const domain = error?.domain;
   const nested = error?.error?.domain || error?.error?.code || error?.error;
   if (domain === "no_workspace") return "Abra um projeto antes de executar Tasks.";
+  if (domain === "language") return "O ambiente Rust aprovado mudou ou está indisponível; revise-o em Problemas → Ambiente Rust.";
   if (nested === "authorization_changed") return "As permissões do plugin mudaram; revise a Task novamente.";
   if (nested === "permission_denied") return "A Task pede uma autoridade que o plugin não possui.";
   if (domain === "runtime") return "O runtime do plugin recusou ou interrompeu a operação.";
@@ -1207,10 +1208,13 @@ async function loadTasks() {
     const catalog = await invoke("task_list");
     renderTasks(catalog.items);
     const strong = catalog.sandbox?.isolatedNetwork === "strong";
-    tasksStatus.dataset.state = strong ? "strong" : "error";
-    tasksStatus.textContent = strong
-      ? `${catalog.items.length} ${catalog.items.length === 1 ? "Task disponível" : "Tasks disponíveis"} · sandbox forte ativo`
-      : "Sandbox forte indisponível; execuções protegidas falharão fechadas.";
+    const failed = (catalog.failures || []).map((failure) => failure.pluginName);
+    tasksStatus.dataset.state = strong && !failed.length ? "strong" : "error";
+    tasksStatus.textContent = !strong
+      ? "Sandbox forte indisponível; execuções protegidas falharão fechadas."
+      : (failed.length
+        ? `O runtime de ${failed.join(", ")} falhou ao listar Tasks; as demais continuam disponíveis.`
+        : `${catalog.items.length} ${catalog.items.length === 1 ? "Task disponível" : "Tasks disponíveis"} · sandbox forte ativo`);
   } catch (error) {
     renderTasks([]);
     tasksStatus.dataset.state = "error";
@@ -1250,6 +1254,9 @@ async function showTaskReview(pluginId, taskId) {
     } else {
       appendTaskReviewMetadata("Dados redigidos", "Nenhum");
     }
+    (review.process.mounts || []).forEach((mount) => {
+      appendTaskReviewMetadata(mount.writable ? "Escrita fora do workspace" : "Leitura adicional", `${mount.sandbox} ← ${mount.host}`);
+    });
     appendTaskReviewMetadata("Validade", `${Math.round(review.process.expiresInMs / 60_000)} min · uso único`);
     appendTaskReviewMetadata("Hash da ação", review.process.actionSha256);
     taskReviewCommand.textContent = review.process.command;
@@ -1259,6 +1266,9 @@ async function showTaskReview(pluginId, taskId) {
       : (review.process.risk === "approval_required"
         ? "Esta execução usa shell, escrita ou rede e exige sua confirmação explícita."
         : "Execução somente leitura. O comando ainda será isolado e auditado.");
+    if (review.pluginId === "io.github.w3ti.lyrnova.language.rust") {
+      taskRiskNote.textContent += " O Cargo executa build scripts, macros procedurais e testes do projeto dentro do sandbox, sem rede.";
+    }
     taskReviewNote.hidden = true;
     taskReviewConfirm.disabled = false;
     taskReviewConfirm.className = review.process.risk === "destructive" ? "danger-button" : "accent-button";

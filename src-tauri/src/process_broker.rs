@@ -83,6 +83,24 @@ pub struct ProcessRequest {
     pub timeout_ms: u64,
 }
 
+/// Additional sandbox resources prepared by trusted core code, such as a reviewed
+/// toolchain or a private build directory. It is deliberately not deserializable:
+/// plugin catalogs can only describe a `ProcessRequest`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SandboxExtension {
+    pub mounts: Vec<SandboxMount>,
+    pub directories: Vec<String>,
+    pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxMount {
+    pub host: PathBuf,
+    pub sandbox: String,
+    pub writable: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessOrigin {
     LocalUser,
@@ -142,6 +160,7 @@ pub struct ProcessReview {
     pub access: ProcessAccess,
     pub network: bool,
     pub environment_keys: Vec<String>,
+    pub mounts: Vec<SandboxMount>,
     pub timeout_ms: u64,
     pub risk: ProcessRisk,
     pub sandbox: SandboxStrength,
@@ -239,6 +258,7 @@ struct ProcessPlan {
     cwd: PathBuf,
     sandbox_cwd: PathBuf,
     request: ProcessRequest,
+    extension: SandboxExtension,
     program: PreparedProgram,
     command_display: String,
     command_sha256: String,
@@ -278,7 +298,24 @@ impl ProcessBroker {
         origin: ProcessOrigin,
         authority: ProcessAuthority,
     ) -> Result<(ProcessReview, ProcessAuditEvent), ProcessBrokerError> {
-        let plan = prepare_plan(workspace, request, origin, authority)?;
+        self.review_with_extension(
+            workspace,
+            request,
+            origin,
+            authority,
+            SandboxExtension::default(),
+        )
+    }
+
+    pub fn review_with_extension(
+        &self,
+        workspace: &Path,
+        request: ProcessRequest,
+        origin: ProcessOrigin,
+        authority: ProcessAuthority,
+        extension: SandboxExtension,
+    ) -> Result<(ProcessReview, ProcessAuditEvent), ProcessBrokerError> {
+        let plan = prepare_plan_with_extension(workspace, request, origin, authority, extension)?;
         let review_token = uuid::Uuid::new_v4().simple().to_string();
         let review = ProcessReview {
             review_token: review_token.clone(),
@@ -289,7 +326,14 @@ impl ProcessBroker {
             cwd: relative_display(&plan.workspace, &plan.cwd),
             access: plan.request.access,
             network: plan.request.network,
-            environment_keys: plan.request.environment.keys().cloned().collect(),
+            environment_keys: plan
+                .request
+                .environment
+                .keys()
+                .chain(plan.extension.environment.keys())
+                .cloned()
+                .collect(),
+            mounts: plan.extension.mounts.clone(),
             timeout_ms: plan.request.timeout_ms,
             risk: plan.risk,
             sandbox: plan.sandbox,
@@ -446,11 +490,28 @@ impl ProcessPlan {
     }
 }
 
+#[cfg(test)]
 fn prepare_plan(
     workspace: &Path,
     request: ProcessRequest,
     origin: ProcessOrigin,
     authority: ProcessAuthority,
+) -> Result<ProcessPlan, ProcessBrokerError> {
+    prepare_plan_with_extension(
+        workspace,
+        request,
+        origin,
+        authority,
+        SandboxExtension::default(),
+    )
+}
+
+fn prepare_plan_with_extension(
+    workspace: &Path,
+    request: ProcessRequest,
+    origin: ProcessOrigin,
+    authority: ProcessAuthority,
+    extension: SandboxExtension,
 ) -> Result<ProcessPlan, ProcessBrokerError> {
     let workspace = workspace
         .canonicalize()
@@ -461,6 +522,7 @@ fn prepare_plan(
     authorize(&request, authority)?;
     validate_timeout(request.timeout_ms)?;
     validate_environment(&request.environment)?;
+    let extension = validate_extension(&workspace, request.access, extension)?;
     let cwd = resolve_cwd(&workspace, request.cwd.as_deref())?;
     let sandbox_cwd = Path::new(SANDBOX_WORKSPACE).join(
         cwd.strip_prefix(&workspace)
@@ -471,6 +533,7 @@ fn prepare_plan(
         ProcessRisk::Destructive
     } else if request.access != ProcessAccess::ReadOnly
         || request.network
+        || extension.mounts.iter().any(|mount| mount.writable)
         || matches!(request.command, ProcessCommand::Shell { .. })
     {
         ProcessRisk::ApprovalRequired
@@ -492,6 +555,9 @@ fn prepare_plan(
         "access": request.access,
         "network": request.network,
         "environment": request.environment,
+        "sandboxMounts": extension.mounts,
+        "sandboxDirectories": extension.directories,
+        "sandboxEnvironment": extension.environment,
         "timeoutMs": request.timeout_ms,
         "risk": risk,
         "sandbox": sandbox,
@@ -506,6 +572,7 @@ fn prepare_plan(
         cwd,
         sandbox_cwd,
         request,
+        extension,
         program,
         command_display,
         command_sha256,
@@ -513,6 +580,71 @@ fn prepare_plan(
         risk,
         sandbox,
     })
+}
+
+const EXTENSION_ROOTS: &[&str] = &["/toolchain", "/tmp/"];
+const MAX_EXTENSION_ENTRIES: usize = 32;
+
+fn validate_extension(
+    workspace: &Path,
+    access: ProcessAccess,
+    mut extension: SandboxExtension,
+) -> Result<SandboxExtension, ProcessBrokerError> {
+    if extension == SandboxExtension::default() {
+        return Ok(extension);
+    }
+    // Extensions only shape the Bubblewrap view; host execution has no equivalent.
+    if access == ProcessAccess::Escalated
+        || extension.mounts.len() > MAX_EXTENSION_ENTRIES
+        || extension.directories.len() > MAX_EXTENSION_ENTRIES
+        || extension.environment.len() > MAX_EXTENSION_ENTRIES
+    {
+        return Err(ProcessBrokerError::InvalidRequest);
+    }
+    let sandbox_path = |path: &str| {
+        let candidate = Path::new(path);
+        candidate.is_absolute()
+            && candidate
+                .components()
+                .skip(1)
+                .all(|component| matches!(component, Component::Normal(_)))
+            && EXTENSION_ROOTS
+                .iter()
+                .any(|root| path == root.trim_end_matches('/') || path.starts_with(root))
+            && path != "/tmp"
+    };
+    for directory in &extension.directories {
+        if !sandbox_path(directory) {
+            return Err(ProcessBrokerError::InvalidRequest);
+        }
+    }
+    for mount in &mut extension.mounts {
+        let host = mount
+            .host
+            .canonicalize()
+            .map_err(|_| ProcessBrokerError::InvalidRequest)?;
+        // The workspace keeps the access mode the request declared.
+        if !sandbox_path(&mount.sandbox)
+            || host.starts_with(workspace)
+            || workspace.starts_with(&host)
+        {
+            return Err(ProcessBrokerError::InvalidRequest);
+        }
+        mount.host = host;
+    }
+    for (key, value) in &extension.environment {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            || ["HOME", "TMPDIR", "LD_PRELOAD", "LD_LIBRARY_PATH"].contains(&key.as_str())
+            || value.len() > MAX_ENVIRONMENT_VALUE_BYTES
+            || value.contains('\0')
+        {
+            return Err(ProcessBrokerError::InvalidEnvironment);
+        }
+    }
+    Ok(extension)
 }
 
 fn authorize(
@@ -860,7 +992,12 @@ fn sandbox_arguments(plan: &ProcessPlan) -> Result<Vec<OsString>, ProcessBrokerE
         "LANG".into(),
         "C.UTF-8".into(),
     ]);
-    for (key, value) in &plan.request.environment {
+    for (key, value) in plan
+        .request
+        .environment
+        .iter()
+        .chain(&plan.extension.environment)
+    {
         args.extend(["--setenv".into(), key.into(), value.into()]);
     }
     args.extend([
@@ -915,6 +1052,21 @@ fn sandbox_arguments(plan: &ProcessPlan) -> Result<Vec<OsString>, ProcessBrokerE
             SANDBOX_WORKSPACE.into(),
         ]),
         ProcessAccess::Escalated => return Err(ProcessBrokerError::InvalidRequest),
+    }
+    for directory in &plan.extension.directories {
+        args.extend(["--dir".into(), directory.into()]);
+    }
+    for mount in &plan.extension.mounts {
+        args.extend([
+            if mount.writable {
+                "--bind"
+            } else {
+                "--ro-bind"
+            }
+            .into(),
+            mount.host.as_os_str().to_owned(),
+            mount.sandbox.as_str().into(),
+        ]);
     }
     let (program, command_args) = sandbox_program_and_args(plan)?;
     args.extend([
@@ -1357,6 +1509,96 @@ mod tests {
                 && values[2] == SANDBOX_WORKSPACE
         }));
         assert!(!args.iter().any(|value| value == "/home"));
+    }
+
+    #[test]
+    fn sandbox_extensions_are_bounded_reviewed_and_bound_to_the_approval() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+        let true_command = || {
+            request(ProcessCommand::Argv {
+                program: "true".into(),
+                args: Vec::new(),
+            })
+        };
+        let plan = |extension: SandboxExtension| {
+            prepare_plan_with_extension(
+                &workspace.0,
+                true_command(),
+                ProcessOrigin::LocalUser,
+                ProcessAuthority::default(),
+                extension,
+            )
+        };
+        let mount = |host: &Path, sandbox: &str, writable| SandboxExtension {
+            mounts: vec![SandboxMount {
+                host: host.into(),
+                sandbox: sandbox.into(),
+                writable,
+            }],
+            ..SandboxExtension::default()
+        };
+
+        let base = plan(SandboxExtension::default()).unwrap();
+        let read_only = plan(mount(&outside.0, "/toolchain", false)).unwrap();
+        let writable = plan(mount(&outside.0, "/tmp/target", true)).unwrap();
+        assert_eq!(base.risk, ProcessRisk::Standard);
+        assert_eq!(read_only.risk, ProcessRisk::Standard);
+        assert_eq!(writable.risk, ProcessRisk::ApprovalRequired);
+        assert_ne!(base.action_sha256, read_only.action_sha256);
+        assert_ne!(read_only.action_sha256, writable.action_sha256);
+        let args: Vec<_> = sandbox_arguments(&writable)
+            .unwrap()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(3).any(|values| {
+            values[0] == "--bind"
+                && values[1] == outside.0.canonicalize().unwrap().to_string_lossy()
+                && values[2] == "/tmp/target"
+        }));
+
+        // The workspace keeps the declared access; other sandbox roots are reserved.
+        for rejected in [
+            mount(&workspace.0, "/tmp/target", true),
+            mount(&workspace.0.join(".."), "/tmp/target", true),
+            mount(&outside.0, "/workspace", true),
+            mount(&outside.0, "/usr", false),
+            mount(&outside.0, "/tmp", true),
+            mount(&outside.0, "/tmp/../etc", true),
+            mount(&outside.0.join("missing"), "/tmp/target", true),
+        ] {
+            assert_eq!(
+                plan(rejected).unwrap_err(),
+                ProcessBrokerError::InvalidRequest
+            );
+        }
+        for key in ["HOME", "LD_PRELOAD", "lowercase", ""] {
+            let extension = SandboxExtension {
+                environment: [(key.to_owned(), "value".to_owned())].into(),
+                ..SandboxExtension::default()
+            };
+            assert_eq!(
+                plan(extension).unwrap_err(),
+                ProcessBrokerError::InvalidEnvironment
+            );
+        }
+        let mut escalated = true_command();
+        escalated.access = ProcessAccess::Escalated;
+        assert_eq!(
+            prepare_plan_with_extension(
+                &workspace.0,
+                escalated,
+                ProcessOrigin::LocalUser,
+                ProcessAuthority {
+                    escalated: true,
+                    ..ProcessAuthority::default()
+                },
+                mount(&outside.0, "/toolchain", false),
+            )
+            .unwrap_err(),
+            ProcessBrokerError::InvalidRequest
+        );
     }
 
     #[cfg(target_os = "linux")]

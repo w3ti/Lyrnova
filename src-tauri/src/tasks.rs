@@ -12,7 +12,7 @@ use crate::{
     process_broker::{
         ProcessAccess, ProcessAuditEvent, ProcessAuthority, ProcessBroker, ProcessBrokerError,
         ProcessOrigin, ProcessOutputEvent, ProcessRequest, ProcessResult, ProcessReview,
-        ProcessSandboxDiagnostic,
+        ProcessSandboxDiagnostic, SandboxExtension,
     },
 };
 
@@ -55,11 +55,30 @@ pub struct TaskSummary {
     pub network: bool,
 }
 
+/// A task defined by trusted core code for a bundled plugin, such as Cargo for Rust.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltinTask {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
+    pub execution: ProcessRequest,
+    pub extension: SandboxExtension,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskList {
     pub items: Vec<TaskSummary>,
+    /// Providers that failed to list tasks; the others remain usable.
+    pub failures: Vec<TaskProviderFailure>,
     pub sandbox: ProcessSandboxDiagnostic,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProviderFailure {
+    pub plugin_id: String,
+    pub plugin_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -144,14 +163,50 @@ impl TaskBroker {
             .into_iter()
             .find(|task| task.id == task_id)
             .ok_or(TaskError::UnknownTask)?;
+        self.review_builtin(
+            workspace,
+            provider,
+            BuiltinTask {
+                id: task.id,
+                label: task.label,
+                detail: task.detail,
+                execution: task.execution,
+                extension: SandboxExtension::default(),
+            },
+        )
+    }
+
+    pub fn list_builtin(&self, provider: &TaskProvider, tasks: &[BuiltinTask]) -> Vec<TaskSummary> {
+        tasks
+            .iter()
+            .filter(|task| authorize_execution(&task.execution, &provider.permissions).is_ok())
+            .map(|task| TaskSummary {
+                plugin_id: provider.id.clone(),
+                plugin_name: provider.name.clone(),
+                task_id: task.id.clone(),
+                label: task.label.clone(),
+                detail: task.detail.clone(),
+                access: task.execution.access,
+                network: task.execution.network,
+            })
+            .collect()
+    }
+
+    pub fn review_builtin(
+        &self,
+        workspace: &Path,
+        provider: &TaskProvider,
+        task: BuiltinTask,
+    ) -> Result<(TaskReview, ProcessAuditEvent), TaskError> {
         let authority = authorize_execution(&task.execution, &provider.permissions)?;
-        let (process, audit) = self.process.review(
+        let (process, audit) = self.process.review_with_extension(
             workspace,
             task.execution,
             ProcessOrigin::Plugin {
                 plugin_id: provider.id.clone(),
             },
             authority,
+            task.extension,
         )?;
         let mut pending = match self.pending.lock() {
             Ok(pending) => pending,

@@ -1,5 +1,27 @@
 # Checkpoint de desenvolvimento
 
+## Tarefas Cargo (#39) — 2026-10-02
+
+Primeira entrega da trilha Rust após a reconciliação do backlog: `cargo check`,
+`build`, `test` e `run` como Tasks do plugin Rust embutido (manifesto 0.1.2, com
+capability `tasks`). Contrato e limites na
+[ADR-0028](../architecture/ADR-0028-cargo-tasks.md).
+
+- O broker ganhou `SandboxExtension`, construída só pelo núcleo: toolchain e
+  registry revisados como leitura e um `target` privado gravável em
+  `cache/cargo-target/<sha256>`. A extensão entra no hash e na revisão.
+- Workspace segue somente leitura, sem rede, `--offline --locked`. A revisão avisa
+  que o Cargo executa build scripts, macros procedurais e testes do projeto.
+- `task_list` não aborta mais quando um runtime externo falha: lista as falhas
+  por plugin e mantém as outras Tasks. Antes, o plugin de fixture que trava
+  escondia as tarefas Cargo.
+- Validação local: 222 testes Rust (um opcional ignorado), clippy/fmt, sintaxe JS
+  e regressão nativa com 34 grupos. O grupo novo executa `cargo test` pela UI com
+  a toolchain da fixture e uma dependência do registry offline; o `build.rs`
+  hostil roda, mas recebe `Read-only file system` ao tentar gravar no projeto.
+- Próximo em #39: erros do Cargo navegáveis no painel Problemas, teste individual,
+  templates de projeto e DAP.
+
 ## Retomada — 2026-10-02
 
 A investigação pendente da pausa foi concluída; supera a "próxima ação" abaixo.
