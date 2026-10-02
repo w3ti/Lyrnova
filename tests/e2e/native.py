@@ -453,10 +453,10 @@ def exercise_rust_environment(browser, workspace, report, valid):
     assert not (workspace / "build-script-executed").exists()
     browser.type('#source-editor textarea.inputarea', valid, replace=True)
     report["checks"].append("reviewed installed toolchain and offline registry cache; external definitions read-only; no lockfile or source writes")
-    exercise_cargo_tasks(browser, workspace, report, original_lock)
+    exercise_cargo_tasks(browser, workspace, report, original_lock, valid)
 
 
-def exercise_cargo_tasks(browser, workspace, report, original_lock):
+def exercise_cargo_tasks(browser, workspace, report, original_lock, valid):
     browser.until('document.querySelector("#editor-workspace").dataset.saveState === "clean"', "saved library before Cargo task")
     browser.click('[data-activity="tasks"]')
     browser.click('[data-action="refresh-tasks"]')
@@ -469,7 +469,7 @@ def exercise_cargo_tasks(browser, workspace, report, original_lock):
     review = browser.script('return document.querySelector("#task-review-metadata").textContent')
     assert "/tmp/target ←" in review and "/toolchain ←" in review, review
     assert "Escrita fora do workspace" in review, review
-    assert browser.script('return document.querySelector("#task-review-command").textContent') == "cargo test --offline --locked"
+    assert browser.script('return document.querySelector("#task-review-command").textContent') == "cargo test --offline --locked --message-format=json"
     assert "build scripts" in browser.script('return document.querySelector("#task-risk-note").textContent')
     browser.click("#task-review-confirm")
     # The fixture build.rs runs, as the review states, but cannot write the workspace.
@@ -485,6 +485,29 @@ def exercise_cargo_tasks(browser, workspace, report, original_lock):
     assert not (workspace / "target").exists(), "Cargo wrote build output into the workspace"
     assert (workspace / "Cargo.lock").read_bytes() == original_lock
     report["checks"].append("Cargo test via reviewed Task: build script denied workspace writes; fixture toolchain, offline registry dependency and private target")
+
+    broken = valid + "pub fn broken() -> u32 { missing_value }\n"
+    line = len(broken.splitlines())
+    column = broken.splitlines()[-1].index("missing_value") + 1
+    (workspace / "src/lib.rs").write_text(broken)
+    browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("missing_value")', "external edit reloads the clean tab")
+    browser.click('[data-task-id="cargo-check"]')
+    browser.until('document.querySelector("#task-review-dialog").open', "cargo check review")
+    assert "--message-format=json" in browser.script('return document.querySelector("#task-review-command").textContent')
+    browser.click("#task-review-confirm")
+    browser.until('document.querySelector("#task-output").textContent.includes("[exited · código 101")', "cargo check reports the error", timeout=180)
+    output = browser.script('return document.querySelector("#task-output").textContent')
+    assert "cannot find value `missing_value`" in output and '"reason"' not in output, output[-2000:]
+    assert "diagnóstico no painel Problemas" in output, output[-500:]
+    browser.click('[data-dock-view="problems"]')
+    location = f"src/lib.rs:{line}:{column}"
+    browser.until(f'Array.from(document.querySelectorAll("#cargo-problems-list .problem-item")).some(n => n.textContent.includes("{location}") && n.textContent.includes("E0425"))', "navigable Cargo diagnostic")
+    assert int(browser.script('return document.querySelector("#problems-count").textContent')) >= 1
+    browser.script(f'Array.from(document.querySelectorAll("#cargo-problems-list .problem-item")).find(n => n.textContent.includes("{location}")).click()')
+    browser.until(f'document.querySelector("#cursor-position").textContent === "Ln {line}, Col {column}"', "Cargo diagnostic opens the location")
+    (workspace / "src/lib.rs").write_text(valid)
+    browser.until('document.querySelector("#editor-workspace").dataset.saveState === "clean" && !document.querySelector("#source-editor .view-lines").textContent.includes("missing_value")', "restored library reloads")
+    report["checks"].append("cargo check JSON rendered as rustc text; workspace error listed in Problems and opens its exact location")
 
 
 def exercise_workspace_watch(browser, workspace, report):

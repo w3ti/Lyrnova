@@ -49,6 +49,29 @@ O linker do sistema é usado pelo rustc. Como distribuições Debian resolvem `c
 por `/etc/alternatives`, o broker passou a montar esse diretório como leitura em
 todas as Tasks; ele contém apenas links para programas do sistema.
 
+## Diagnósticos navegáveis
+
+As tarefas usam `--message-format=json`. O backend remonta as linhas do stdout,
+substitui cada `compiler-message` pelo texto renderizado do rustc (na saída de
+erro da Task) e descarta mensagens de artefatos. De cada diagnóstico `error` ou
+`warning`, guarda o primeiro span primário dentro do workspace: caminho relativo
+só com componentes normais (`/workspace/` é removido), linha, coluna, mensagem
+(até 4 KiB) e código. Spans de dependências, da biblioteca padrão ou fora do
+projeto continuam na saída, mas não viram itens navegáveis. A lista para em 500
+itens e indica truncamento.
+
+A análise para em `build-finished`: o que os testes ou o programa imprimem depois
+aparece literalmente e nunca vira diagnóstico. Ao terminar, o evento
+`task-diagnostics` entrega os itens ligados ao `processId`. O painel Problemas
+mostra a seção “Cargo” com os resultados da última Task Rust, somados ao contador
+da aba; clicar abre o arquivo na linha e coluna. A seção é limpa ao iniciar outra
+Task Rust, trocar de projeto ou desativar o plugin.
+
+O leitor de streams do broker passou a manter caracteres UTF-8 divididos entre
+leituras, o que também corrige acentos corrompidos na saída das demais Tasks. A
+transmissão continua limitada a 1 MiB por stream (ADR-0016): em builds muito
+grandes, diagnósticos posteriores a esse volume não são coletados.
+
 ## Consequências
 
 `cargo build`, `test` e `run` executam build scripts, macros procedurais, testes e
@@ -67,5 +90,4 @@ revistos junto da migração para cgroup v2.
 Um runtime externo que falha ao listar Tasks não esconde mais as demais: a lista
 inclui as falhas por plugin e mantém os outros providers utilizáveis.
 
-Pendências do plugin Rust (#39): erros do Cargo navegáveis, seleção de pacote e
-teste individual, templates de projeto, painel de testes e depuração via DAP.
+Pendências do plugin Rust (#39): seleção de pacote e teste individual, templates de projeto, painel de testes e depuração via DAP.

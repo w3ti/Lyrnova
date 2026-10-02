@@ -678,6 +678,8 @@ body.resizing-panels iframe { pointer-events: none; }
 .problem-item > span:first-child { color: var(--red); }
 .problem-item[data-severity="2"] > span:first-child { color: var(--yellow); }
 .problem-location { color: var(--muted); flex-shrink: 0; }
+.cargo-problems { margin-top: 10px; padding-top: 2px; border-top: 1px solid var(--border); }
+.cargo-problems[hidden] { display: none; }
 #builtin-permissions label { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
 
 .language-environment-dialog { width: min(720px, calc(100vw - 40px)); }

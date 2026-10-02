@@ -1,5 +1,6 @@
 //! Versioned Rust diagnostics and read-only symbol queries. No generic LSP IPC.
 mod cargo;
+pub use cargo::{CargoDiagnostics, CargoOutput};
 mod environment;
 mod protocol;
 pub use environment::{EnvironmentChoice, EnvironmentReview, EnvironmentSummary};

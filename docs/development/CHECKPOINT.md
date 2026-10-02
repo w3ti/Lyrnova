@@ -19,8 +19,14 @@ capability `tasks`). Contrato e limites na
   e regressão nativa com 34 grupos. O grupo novo executa `cargo test` pela UI com
   a toolchain da fixture e uma dependência do registry offline; o `build.rs`
   hostil roda, mas recebe `Read-only file system` ao tentar gravar no projeto.
-- Próximo em #39: erros do Cargo navegáveis no painel Problemas, teste individual,
-  templates de projeto e DAP.
+- Erros navegáveis: as tarefas usam `--message-format=json`; o backend devolve o
+  texto do rustc à saída e envia `task-diagnostics`. A seção “Cargo” do painel
+  Problemas abre arquivo, linha e coluna. A análise para em `build-finished`, então
+  saída de testes/programa não forja diagnósticos. O broker também deixou de
+  corromper caracteres UTF-8 divididos entre leituras.
+- Validação local: 225 testes Rust, 37 JavaScript e 35 grupos nativos; o novo grupo
+  roda `cargo check` com erro e navega até a posição exata.
+- Próximo em #39: teste individual, templates de projeto e DAP.
 
 ## Retomada — 2026-10-02
 

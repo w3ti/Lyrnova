@@ -4,7 +4,8 @@
 use super::*;
 use crate::{
     process_broker::{
-        ProcessAccess, ProcessCommand, ProcessRequest, SandboxExtension, SandboxMount,
+        ProcessAccess, ProcessCommand, ProcessRequest, ProcessStream, SandboxExtension,
+        SandboxMount,
     },
     tasks::BuiltinTask,
 };
@@ -14,6 +15,9 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const CARGO_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const SANDBOX_CARGO_HOME: &str = "/tmp/cargo";
 const SANDBOX_TARGET: &str = "/tmp/target";
+const MAX_CARGO_DIAGNOSTICS: usize = 500;
+const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
+const MAX_PENDING_LINE_BYTES: usize = 1024 * 1024;
 
 struct CargoTaskSpec {
     id: &'static str,
@@ -149,9 +153,14 @@ impl LanguageService {
                 execution: ProcessRequest {
                     command: ProcessCommand::Argv {
                         program: "cargo".into(),
-                        args: [task.subcommand, "--offline", "--locked"]
-                            .map(String::from)
-                            .into(),
+                        args: [
+                            task.subcommand,
+                            "--offline",
+                            "--locked",
+                            "--message-format=json",
+                        ]
+                        .map(String::from)
+                        .into(),
                     },
                     cwd: None,
                     environment: [("CARGO_TERM_COLOR".to_owned(), "never".to_owned())].into(),
@@ -163,6 +172,135 @@ impl LanguageService {
             })
             .collect())
     }
+}
+
+/// A compiler diagnostic from a Cargo task, located inside the workspace.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoDiagnostic {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub severity: String,
+    pub message: String,
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoDiagnostics {
+    pub items: Vec<CargoDiagnostic>,
+    pub truncated: bool,
+}
+
+/// Turns `--message-format=json` stdout back into readable output while
+/// collecting navigable diagnostics. Parsing stops at `build-finished`, so text
+/// printed later by tests or the program cannot forge compiler messages.
+#[derive(Default)]
+pub struct CargoOutput {
+    pending: String,
+    finished: bool,
+    diagnostics: CargoDiagnostics,
+}
+
+impl CargoOutput {
+    pub fn feed(&mut self, data: &str) -> Vec<(ProcessStream, String)> {
+        let mut output = Vec::new();
+        self.pending.push_str(data);
+        while let Some(end) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=end).collect();
+            self.line(&line, &mut output);
+        }
+        if self.pending.len() > MAX_PENDING_LINE_BYTES {
+            let line = std::mem::take(&mut self.pending);
+            output.push((ProcessStream::Stdout, line));
+        }
+        output
+    }
+
+    pub fn finish(mut self) -> (Vec<(ProcessStream, String)>, CargoDiagnostics) {
+        let mut output = Vec::new();
+        let line = std::mem::take(&mut self.pending);
+        if !line.is_empty() {
+            self.line(&line, &mut output);
+        }
+        (output, self.diagnostics)
+    }
+
+    fn line(&mut self, line: &str, output: &mut Vec<(ProcessStream, String)>) {
+        let message = (!self.finished && line.starts_with('{'))
+            .then(|| serde_json::from_str::<Value>(line).ok())
+            .flatten();
+        let Some(message) = message.filter(|m| m["reason"].is_string()) else {
+            output.push((ProcessStream::Stdout, line.to_owned()));
+            return;
+        };
+        match message["reason"].as_str() {
+            Some("compiler-message") => {
+                if let Some(rendered) = message["message"]["rendered"].as_str() {
+                    output.push((ProcessStream::Stderr, rendered.to_owned()));
+                }
+                self.collect(&message["message"]);
+            }
+            Some("build-finished") => self.finished = true,
+            _ => {}
+        }
+    }
+
+    fn collect(&mut self, message: &Value) {
+        let severity = match message["level"].as_str() {
+            Some(level @ ("error" | "warning")) => level,
+            _ => return,
+        };
+        let Some((path, line, column)) = message["spans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|span| span["is_primary"] == true)
+            .find_map(|span| {
+                Some((
+                    workspace_path(span["file_name"].as_str()?)?,
+                    u32::try_from(span["line_start"].as_u64()?).ok()?,
+                    u32::try_from(span["column_start"].as_u64()?).ok()?,
+                ))
+            })
+        else {
+            return;
+        };
+        if self.diagnostics.items.len() >= MAX_CARGO_DIAGNOSTICS {
+            self.diagnostics.truncated = true;
+            return;
+        }
+        let mut text = message["message"].as_str().unwrap_or_default().to_owned();
+        if text.len() > MAX_DIAGNOSTIC_MESSAGE_BYTES {
+            let mut end = MAX_DIAGNOSTIC_MESSAGE_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        self.diagnostics.items.push(CargoDiagnostic {
+            path,
+            line: line.max(1),
+            column: column.max(1),
+            severity: severity.into(),
+            message: text,
+            code: message["code"]["code"].as_str().map(str::to_owned),
+        });
+    }
+}
+
+/// Relative workspace path for a rustc span, or `None` for external sources.
+fn workspace_path(file: &str) -> Option<String> {
+    let relative = file.strip_prefix("/workspace/").unwrap_or(file);
+    let path = Path::new(relative);
+    (!relative.is_empty()
+        && relative.len() <= 4096
+        && !relative.contains(['\0', '\\'])
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))))
+    .then(|| relative.to_owned())
 }
 
 #[cfg(test)]
@@ -194,6 +332,98 @@ mod tests {
             registry: vec![],
             dependencies: false,
         }
+    }
+
+    fn compiler_message(file: &str, level: &str, line: u64) -> String {
+        json!({
+            "reason": "compiler-message",
+            "message": {
+                "rendered": format!("{level}: problem in {file}\n"),
+                "level": level,
+                "message": format!("problem in {file}"),
+                "code": {"code": "E0425"},
+                "spans": [
+                    {"file_name": "src/other.rs", "is_primary": false, "line_start": 9, "column_start": 9},
+                    {"file_name": file, "is_primary": true, "line_start": line, "column_start": 5}
+                ]
+            }
+        })
+        .to_string()
+            + "\n"
+    }
+
+    #[test]
+    fn cargo_json_is_rendered_and_workspace_locations_are_collected() {
+        let mut output = CargoOutput::default();
+        let first = compiler_message("src/lib.rs", "error", 3);
+        let (head, tail) = first.split_at(first.len() / 2);
+        assert!(output.feed(head).is_empty());
+        let mut shown = output.feed(&format!("{tail}not json\n"));
+        shown.extend(output.feed(&compiler_message("/workspace/src/main.rs", "warning", 1)));
+        shown.extend(output.feed(&compiler_message(
+            "/tmp/cargo/registry/src/dep/lib.rs",
+            "error",
+            1,
+        )));
+        shown.extend(output.feed(&compiler_message("../outside.rs", "error", 1)));
+        shown.extend(output.feed(&compiler_message("src/lib.rs", "note", 1)));
+        shown.extend(output.feed("{\"reason\":\"compiler-artifact\"}\n{\"reason\":\"build-finished\",\"success\":false}\n"));
+        // After the build, test or program output is shown verbatim and never parsed.
+        let forged = compiler_message("src/forged.rs", "error", 1);
+        shown.extend(output.feed(&forged));
+        let (rest, diagnostics) = output.finish();
+        assert!(rest.is_empty());
+        assert_eq!(
+            shown[0],
+            (
+                ProcessStream::Stderr,
+                "error: problem in src/lib.rs\n".into()
+            )
+        );
+        assert_eq!(shown[1], (ProcessStream::Stdout, "not json\n".into()));
+        assert_eq!(shown.last().unwrap(), &(ProcessStream::Stdout, forged));
+        assert!(
+            !shown
+                .iter()
+                .any(|(_, text)| text.contains("compiler-artifact"))
+        );
+        assert_eq!(
+            diagnostics.items,
+            vec![
+                CargoDiagnostic {
+                    path: "src/lib.rs".into(),
+                    line: 3,
+                    column: 5,
+                    severity: "error".into(),
+                    message: "problem in src/lib.rs".into(),
+                    code: Some("E0425".into()),
+                },
+                CargoDiagnostic {
+                    path: "src/main.rs".into(),
+                    line: 1,
+                    column: 5,
+                    severity: "warning".into(),
+                    message: "problem in /workspace/src/main.rs".into(),
+                    code: Some("E0425".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_diagnostics_are_bounded() {
+        let mut output = CargoOutput::default();
+        for _ in 0..=MAX_CARGO_DIAGNOSTICS {
+            output.feed(&compiler_message("src/lib.rs", "error", 1));
+        }
+        let unterminated = "x".repeat(MAX_PENDING_LINE_BYTES + 1);
+        assert_eq!(
+            output.feed(&unterminated),
+            vec![(ProcessStream::Stdout, unterminated)]
+        );
+        let (_, diagnostics) = output.finish();
+        assert_eq!(diagnostics.items.len(), MAX_CARGO_DIAGNOSTICS);
+        assert!(diagnostics.truncated);
     }
 
     #[test]

@@ -1256,6 +1256,16 @@ fn stream_reader(
         let mut captured = Vec::new();
         let mut truncated = false;
         let mut buffer = [0u8; 8 * 1024];
+        let mut partial = Vec::new();
+        let send = |data: String| {
+            if !data.is_empty() {
+                emit(ProcessOutputEvent {
+                    process_id: process_id.clone(),
+                    stream,
+                    data,
+                });
+            }
+        };
         while let Ok(read) = reader.read(&mut buffer) {
             if read == 0 {
                 break;
@@ -1264,19 +1274,29 @@ fn stream_reader(
             let kept = remaining.min(read);
             if kept > 0 {
                 captured.extend_from_slice(&buffer[..kept]);
-                emit(ProcessOutputEvent {
-                    process_id: process_id.clone(),
-                    stream,
-                    data: String::from_utf8_lossy(&buffer[..kept]).into_owned(),
-                });
+                partial.extend_from_slice(&buffer[..kept]);
+                send(decode_utf8_prefix(&mut partial));
             }
             truncated |= kept < read;
         }
+        send(String::from_utf8_lossy(&partial).into_owned());
         CapturedOutput {
             bytes: captured,
             truncated,
         }
     })
+}
+
+/// Decodes the complete UTF-8 prefix and keeps a character split across reads.
+fn decode_utf8_prefix(bytes: &mut Vec<u8>) -> String {
+    let complete = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => bytes.len(),
+    };
+    let decoded = String::from_utf8_lossy(&bytes[..complete]).into_owned();
+    bytes.drain(..complete);
+    decoded
 }
 
 fn join_capture(reader: JoinHandle<CapturedOutput>) -> Result<CapturedOutput, ProcessBrokerError> {
@@ -1511,6 +1531,18 @@ mod tests {
                 && values[2] == SANDBOX_WORKSPACE
         }));
         assert!(!args.iter().any(|value| value == "/home"));
+    }
+
+    #[test]
+    fn streamed_utf8_is_not_split_between_reads() {
+        let mut bytes = "ação".as_bytes()[..2].to_vec();
+        assert_eq!(decode_utf8_prefix(&mut bytes), "a");
+        assert_eq!(bytes, "ç".as_bytes()[..1]);
+        bytes.extend_from_slice(&"ação".as_bytes()[2..]);
+        assert_eq!(decode_utf8_prefix(&mut bytes), "ção");
+        assert!(bytes.is_empty());
+        let mut invalid = vec![b'a', 0xff, b'b'];
+        assert_eq!(decode_utf8_prefix(&mut invalid), "a\u{fffd}b");
     }
 
     #[test]

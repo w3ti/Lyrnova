@@ -16,7 +16,7 @@ const messages = {
   invalid_document: "Um arquivo não pôde ser enviado à análise.",
 };
 
-export function createRustDiagnostics({ invoke, monaco, getWorkspace, getDocuments, modelFor, navigate, prepareRename, review }) {
+export function createRustDiagnostics({ invoke, monaco, getWorkspace, getDocuments, modelFor, navigate, prepareRename, review, onCount }) {
   const status = document.querySelector("#language-status");
   const list = document.querySelector("#problems-list");
   const count = document.querySelector("#problems-count");
@@ -152,7 +152,7 @@ export function createRustDiagnostics({ invoke, monaco, getWorkspace, getDocumen
         const note = document.createElement("p"); note.textContent = `${diagnostic.path}: resultados limitados.`; list.append(note);
       }
     }
-    count.textContent = String(total);
+    if (onCount) onCount(total); else count.textContent = String(total);
   }
   function changed() {
     const before = fingerprint();

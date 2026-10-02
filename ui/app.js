@@ -3,6 +3,7 @@ import { prepareRenameDrafts } from "./language-edits.js";
 import * as monaco from "monaco-editor";
 import { createTerminalView } from "./terminal.js";
 import { createRustDiagnostics } from "./language.js";
+import { createCargoProblems } from "./cargo-problems.js";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
@@ -291,6 +292,9 @@ let sessionTransition = false;
 let editorGeneration = 0;
 let editorRestoring = false;
 let diagnosticsView = null;
+let cargoProblems = null;
+const RUST_PLUGIN_ID = "io.github.w3ti.lyrnova.language.rust";
+const problemCounts = { language: 0, cargo: 0 };
 let workspaceEntries = [];
 const collapsedDirectories = new Set();
 let selectedWorkspacePath = null;
@@ -481,6 +485,7 @@ function createPluginTag(text, tone = "neutral") {
 function renderPluginCatalog(plugins = currentPluginCatalog) {
   currentPluginCatalog = Array.isArray(plugins) ? plugins : [];
   diagnosticsView?.configure(currentPluginCatalog);
+  if (!currentPluginCatalog.some((plugin) => plugin.id === RUST_PLUGIN_ID && plugin.enabled)) cargoProblems?.clear();
   pluginList.replaceChildren();
   if (!currentPluginCatalog.length) {
     const empty = document.createElement("p");
@@ -1126,6 +1131,10 @@ async function bindTaskOutput() {
       if (!runningTask || payload.processId !== runningTask.processId) return;
       appendTaskOutput(payload.data);
     });
+    await listen("task-diagnostics", ({ payload }) => {
+      if (!runningTask || payload.processId !== runningTask.processId) return;
+      cargoProblems?.show(payload.diagnostics, runningTask.label);
+    });
   } catch {
     appendTaskOutput("\n[Streaming de Tasks indisponível]\n");
   }
@@ -1266,7 +1275,7 @@ async function showTaskReview(pluginId, taskId) {
       : (review.process.risk === "approval_required"
         ? "Esta execução usa shell, escrita ou rede e exige sua confirmação explícita."
         : "Execução somente leitura. O comando ainda será isolado e auditado.");
-    if (review.pluginId === "io.github.w3ti.lyrnova.language.rust") {
+    if (review.pluginId === RUST_PLUGIN_ID) {
       taskRiskNote.textContent += " O Cargo executa build scripts, macros procedurais e testes do projeto dentro do sandbox, sem rede.";
     }
     taskReviewNote.hidden = true;
@@ -1302,6 +1311,7 @@ async function executeReviewedTask() {
     processId: review.process.processId,
     label: review.label,
   };
+  if (review.pluginId === RUST_PLUGIN_ID) cargoProblems?.clear();
   taskOutput.textContent = `Task: ${review.label}\nPlugin: ${review.pluginName}\nComando: ${review.process.command}\n\n`;
   terminal.hidden = false;
   setDockView("tasks");
@@ -1313,6 +1323,9 @@ async function executeReviewedTask() {
     });
     const code = result.exitCode === null ? "sem código" : `código ${result.exitCode}`;
     appendTaskOutput(`\n[${result.outcome} · ${code} · ${result.durationMs} ms${result.stdoutTruncated || result.stderrTruncated ? " · saída truncada" : ""}]\n`);
+    if (review.pluginId === RUST_PLUGIN_ID && cargoProblems?.count()) {
+      appendTaskOutput(`[${cargoProblems.count()} ${cargoProblems.count() === 1 ? "diagnóstico" : "diagnósticos"} no painel Problemas]\n`);
+    }
     announce(result.outcome === "exited" && result.exitCode === 0 ? "Task concluída" : "Task encerrada");
   } catch (error) {
     appendTaskOutput(`\n[${taskFlowErrorMessage(error)}]\n`);
@@ -2815,6 +2828,7 @@ function clearEditorWorkspace() {
   workspaceContext = null;
   ++workspaceTreeSequence;
   diagnosticsView?.reset();
+  cargoProblems?.clear();
   ++editorGeneration;
   clearTimeout(sessionTimer);
   sessionTimer = null;
@@ -3634,17 +3648,32 @@ workspaceMonitor = createWorkspaceMonitor({
   }),
 });
 
+function updateProblemsCount(source, total) {
+  problemCounts[source] = total;
+  document.querySelector("#problems-count").textContent = String(problemCounts.language + problemCounts.cargo);
+}
+
+async function navigateToProblem(path, position) {
+  const generation = editorGeneration;
+  await openDocument(path, true, position.line + 1);
+  if (generation === editorGeneration && activeDocument === path) { codeEditor.setPosition({ lineNumber: position.line + 1, column: position.character + 1 }); codeEditor.revealPositionInCenter(codeEditor.getPosition()); }
+}
+
 diagnosticsView = createRustDiagnostics({
   invoke, monaco, getWorkspace: () => currentProject?.path,
   getDocuments: () => openDocuments.map(path => ({ path, text: draftDocuments.get(path) ?? "" })),
   modelFor: path => editorModels.get(path),
   prepareRename: prepareRustRename,
-  navigate: async (path, position) => {
-    const generation = editorGeneration;
-    await openDocument(path, true, position.line + 1);
-    if (generation === editorGeneration && activeDocument === path) { codeEditor.setPosition({ lineNumber: position.line + 1, column: position.character + 1 }); codeEditor.revealPositionInCenter(codeEditor.getPosition()); }
-  },
+  navigate: navigateToProblem,
   review: openRustPermissionReview,
+  onCount: total => updateProblemsCount("language", total),
+});
+cargoProblems = createCargoProblems({
+  section: document.querySelector("#cargo-problems"),
+  title: document.querySelector("#cargo-problems-title"),
+  list: document.querySelector("#cargo-problems-list"),
+  navigate: navigateToProblem,
+  onCount: total => updateProblemsCount("cargo", total),
 });
 terminalView = createTerminalView(terminalOutput, invoke, listen);
 initializeCodeEditor();

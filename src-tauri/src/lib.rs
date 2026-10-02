@@ -1729,12 +1729,59 @@ async fn task_execute(
     };
     let task_broker = plugins.tasks.clone();
     let output_window = window.clone();
+    // Cargo tasks print JSON on stdout; show rustc's rendering and collect locations.
+    let cargo = (plugin_id == language::RUST_PLUGIN_ID)
+        .then(|| Arc::new(Mutex::new(Some(language::CargoOutput::default()))));
+    let cargo_output = cargo.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let emit: Arc<dyn Fn(ProcessOutputEvent) + Send + Sync> = Arc::new(move |event| {
-            let _ = output_window.emit("task-output", event);
+            let parsed = match (&cargo_output, event.stream) {
+                (Some(parser), process_broker::ProcessStream::Stdout) => parser
+                    .lock()
+                    .ok()
+                    .and_then(|mut parser| parser.as_mut().map(|parser| parser.feed(&event.data))),
+                _ => None,
+            };
+            match parsed {
+                Some(chunks) => {
+                    for (stream, data) in chunks {
+                        let _ = output_window.emit(
+                            "task-output",
+                            ProcessOutputEvent {
+                                process_id: event.process_id.clone(),
+                                stream,
+                                data,
+                            },
+                        );
+                    }
+                }
+                None => {
+                    let _ = output_window.emit("task-output", event);
+                }
+            }
         });
         let (result, audits) =
             task_broker.execute(&review_token, &action_sha256, &provider.permissions, emit)?;
+        if let Some(parser) = cargo.and_then(|parser| parser.lock().ok()?.take()) {
+            let (chunks, diagnostics) = parser.finish();
+            for (stream, data) in chunks {
+                let _ = window.emit(
+                    "task-output",
+                    ProcessOutputEvent {
+                        process_id: result.process_id.clone(),
+                        stream,
+                        data,
+                    },
+                );
+            }
+            let _ = window.emit(
+                "task-diagnostics",
+                CargoTaskDiagnostics {
+                    process_id: result.process_id.clone(),
+                    diagnostics,
+                },
+            );
+        }
         for audit in audits {
             let _ = window.emit("process-audit", audit);
         }
@@ -1742,6 +1789,13 @@ async fn task_execute(
     })
     .await
     .map_err(|_| TaskFlowError::Task(TaskError::StateUnavailable))?
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoTaskDiagnostics {
+    process_id: String,
+    diagnostics: language::CargoDiagnostics,
 }
 
 #[tauri::command]
