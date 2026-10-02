@@ -45,6 +45,10 @@ toolchain o fornece. O build vai para `cache/cargo-target/<sha256 do workspace>`
 diretório 0700 do Lyrnova montado como `/tmp/target`, preservando builds
 incrementais sem escrever `target/` no projeto.
 
+O linker do sistema é usado pelo rustc. Como distribuições Debian resolvem `cc`
+por `/etc/alternatives`, o broker passou a montar esse diretório como leitura em
+todas as Tasks; ele contém apenas links para programas do sistema.
+
 ## Consequências
 
 `cargo build`, `test` e `run` executam build scripts, macros procedurais, testes e

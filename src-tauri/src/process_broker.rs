@@ -1019,7 +1019,9 @@ fn sandbox_arguments(plan: &ProcessPlan) -> Result<Vec<OsString>, ProcessBrokerE
             push_ro_bind(&mut args, Path::new(path), Path::new(path));
         }
     }
+    // Debian-based systems resolve tools such as `cc` through alternatives links.
     for path in [
+        "/etc/alternatives",
         "/etc/ld.so.cache",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
