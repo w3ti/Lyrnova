@@ -33,7 +33,6 @@
           <button class="project-card selected" type="button" data-action="open-project" aria-current="true" title="Abrir outro projeto">
             <span class="project-mark" id="project-mark" aria-hidden="true">L</span>
             <span class="project-copy"><strong id="project-name">Lyrnova</strong><small id="project-git-summary">Carregando Git…</small></span>
-            <span class="project-menu" aria-hidden="true">•••</span>
           </button>
           <div class="section-heading file-heading"><span>Explorer</span><span class="heading-actions file-actions"><button class="icon-button" type="button" data-action="new-file" title="Novo arquivo" aria-label="Novo arquivo">＋</button><button class="icon-button" type="button" data-action="new-directory" title="Nova pasta" aria-label="Nova pasta">▱</button><button class="icon-button" type="button" data-action="move-entry" title="Mover ou renomear seleção" aria-label="Mover ou renomear seleção">↗</button><button class="icon-button danger-icon" type="button" data-action="delete-entry" title="Excluir seleção" aria-label="Excluir seleção">×</button><button class="icon-button" type="button" data-action="refresh-files" title="Atualizar" aria-label="Atualizar arquivos">↻</button></span></div>
           <section class="sidebar-files" aria-label="Arquivos do projeto">
@@ -54,7 +53,7 @@
         </section>
 
         <section class="sidebar-panel git-panel" aria-label="Controle de código-fonte">
-          <div class="section-heading"><span>Controle de código-fonte</span><button class="icon-button" type="button" aria-label="Mais ações Git">•••</button></div>
+          <div class="section-heading"><span>Controle de código-fonte</span></div>
           <div class="git-branch"><span aria-hidden="true">⑂</span><span><strong id="git-branch-name">Git</strong><small id="git-branch-summary">Carregando status…</small></span><button type="button" data-action="refresh-git" title="Atualizar" aria-label="Atualizar status Git">↻</button></div>
           <label class="commit-input"><textarea id="git-commit-message" rows="2" maxlength="16384" placeholder="Mensagem de commit" aria-label="Mensagem de commit"></textarea><button id="git-commit-button" type="button" data-action="git-commit" disabled>Revisar commit</button></label>
           <section id="git-staged-group" hidden>
@@ -121,7 +120,6 @@
             <button class="toolbar-button" type="button" data-action="focus-editor"><span aria-hidden="true">{ }</span> Editor</button>
             <button class="toolbar-button" type="button" data-action="toggle-terminal" aria-pressed="true"><span aria-hidden="true">⌘</span> Terminal</button>
             <button class="toolbar-button" type="button" data-action="toggle-inspector" aria-pressed="true"><span aria-hidden="true">◧</span> Alterações <b id="git-toolbar-count">0</b></button>
-            <button class="icon-button" type="button" aria-label="Mais opções">•••</button>
             <div class="window-controls" aria-label="Controles da janela">
               <button class="window-control" id="window-minimize" type="button" title="Minimizar" aria-label="Minimizar">−</button>
               <button class="window-control" id="window-maximize" type="button" title="Maximizar" aria-label="Maximizar">□</button>
