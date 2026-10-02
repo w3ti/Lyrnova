@@ -1,5 +1,10 @@
 # Levantamento de pendências do produto — 2026-09-25
 
+Reconciliação em 2026-10-02: as issues #3, #5, #6, #8, #12, #14–#20, #22, #24, #25
+e #39 receberam comentário de progresso e tiveram marcados somente os critérios
+com evidência no código, nas ADRs ou no CI. Nenhuma foi fechada: todas mantêm
+critérios pendentes. A triagem abaixo foi atualizada para essas issues.
+
 Atualização em 2026-09-27: correções rápidas e auto-imports publicados e validados
 no [CI de `e7fed1b`](https://github.com/w3ti/Lyrnova/actions/runs/36313326018).
 A entrega 11 acrescenta monitor por eventos para até 100 mil entradas,
@@ -132,7 +137,7 @@ Nenhuma linha recomenda fechar uma issue automaticamente.
 | #3 | Substancial | Smoke nativo em perfil limpo e aceites completos. |
 | #4 | Substancial | Riscos residuais, Windows e validação adversarial final. |
 | #5 | Parcial | Consumidores/fixtures LSP, DAP, templates, testes e providers externos. |
-| #6 | Parcial | Sessão/documentos, retenção, migração/recovery e cofre de credenciais. |
+| #6 | Parcial | Sessão do editor recuperável (ADR-0020); faltam retenção, migração com backup e cofre de credenciais. |
 | #7 | Parcial | Assets existem; falta pipeline de derivados/checksums e validação do splash. |
 | #8 | Substancial | Jornadas frontend, matrizes, dependências/licenças e evidência dos gates. |
 | #9 | Substancial | Busca/filtros de plugins e matriz de layout/acessibilidade. |
@@ -143,15 +148,15 @@ Nenhuma linha recomenda fechar uma issue automaticamente.
 | #14 | Substancial | Resolução de paths resistente a corridas e aceites de atribuição/cancelamento. |
 | #15 | Substancial | Quotas por execução, fechamento de corridas de cwd e homologação no host alvo. |
 | #16 | Substancial | Validar jornadas acessíveis e reconciliar checkpoint com commit publicado. |
-| #17 | Pendente | Teste ponta a ponta, métricas e decisão de aprovação do MVP. |
-| #18 | Parcial | Substituir pipes por PTY, interação, resize e ciclo completo de processos. |
-| #19 | Substancial | Mudanças externas, escala, integração de linguagem e contexto extensível. |
-| #20 | Parcial | Status real existe; diff real/multi-escopo ainda falta. |
+| #17 | Substancial | Jornadas nativa (33 grupos) e de entrada do SO (100%/200%) no CI; faltam template, desinstalar plugin, matriz Wayland/IME/leitor de tela e go/no-go. |
+| #18 | Substancial | PTY Linux (ADR-0019); faltam múltiplas sessões, busca, links, Wayland e fixture PTY. |
+| #19 | Substancial | Monitor incremental (ADR-0025/0027) e rascunhos; faltam navegação completa por teclado e pastas profundas. |
+| #20 | Parcial | Diff real de worktree/índice (ADR-0018); faltam escopos commit/branch/turn, side-by-side e multi-repo. |
 | #21 | Pendente | Revisão e comentários inline vinculados a uma base imutável. |
-| #22 | Parcial | Staged diff antes do commit, revert/push, política de hooks e auditoria. |
+| #22 | Parcial | Commit mostra o staged diff (ADR-0018); faltam revert/push, política de hooks e auditoria. |
 | #23 | Pendente | Gerenciamento e recuperação de worktrees. |
 | #24 | Parcial | Tasks existem; configuração, templates, setup e hierarquia de instruções faltam. |
-| #25 | Parcial | Restauração completa, safe mode, notificações e preferências restantes. |
+| #25 | Parcial | Restauração sem repetir comandos; faltam safe mode, origem das configurações e atalhos editáveis. |
 | #26 | Parcial | Preparador existe; garantir checkout limpo, exclusões e reprodutibilidade. |
 | #27 | Parcial | Receita existe; comprovar build e ciclo de pacote em ambientes limpos. |
 | #28 | Pendente | Pacotes e matriz Fedora/Debian/Ubuntu/OpenBase. |
@@ -165,7 +170,7 @@ Nenhuma linha recomenda fechar uma issue automaticamente.
 | #36 | Pendente | Release reconstruível, assinada, auditável e com runbook. |
 | #37 | Parcial | Adapter existente; instalação acessível, seleção, contexto e lifecycle completos. |
 | #38 | Pendente | Plugin Gemini. |
-| #39 | Parcial | Manifesto/snippets Rust; faltam LSP/Cargo/templates/testes/debug integrados. |
+| #39 | Parcial | LSP com diagnósticos, definição, hover, completion, referências, rename, rustfmt, quick fixes e auto-imports; faltam Cargo tasks, templates, testes, DAP e desinstalação. |
 | #40 | Pendente | Plugin Angular e suas dependências. |
 | #41 | Pendente | Plugin React e suas dependências. |
 | #42 | Pendente | Plugin Node.js e suas dependências. |
