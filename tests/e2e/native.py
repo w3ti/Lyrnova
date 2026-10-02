@@ -615,10 +615,10 @@ def exercise_rust_actions(browser, workspace, report, valid, session):
     partial = 'mod helper;\npub fn answer() -> i32 { helper::tar }\n'
     revision = replace(partial)
     column = partial.splitlines()[1].index('tar') + 3
-    completions = query('completion', revision, 1, column)
-    assert any('target' in item['label'] for item in completions['items']), completions
+    # rust-analyzer can answer an incomplete list before it indexes `helper`.
+    wait_for(lambda: any('target' in item['label'] for item in query('completion', revision, 1, column)['items']), 'Rust completion includes module item', timeout=30)
     position(1, column); key(' ', 'Space', 32, ctrl=True)
-    browser.until('document.querySelector(".suggest-widget")?.textContent.includes("target")', 'real Rust completion popup')
+    browser.until('document.querySelector(".suggest-widget.visible .monaco-list-row.focused")?.textContent.includes("target")', 'real Rust completion popup')
     key('Enter', 'Enter', 13)
     browser.until('document.querySelector("#source-editor .view-lines").textContent.includes("target()")', 'completion insertion')
     key('Escape','Escape',27)
