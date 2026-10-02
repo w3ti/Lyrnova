@@ -607,8 +607,8 @@ def exercise_rust_actions(browser, workspace, report, valid, session):
 
     revision = replace(valid)
     column = valid.splitlines()[1].index('target') + 1
-    refs = query('references', revision, 1, column)
-    assert {item['path'] for item in refs} == {'src/lib.rs','src/helper.rs'}, refs
+    # rust-analyzer may answer empty while it reanalyzes the restored buffer.
+    refs = wait_for(lambda: (found := query('references', revision, 1, column)) and {item['path'] for item in found} == {'src/lib.rs','src/helper.rs'} and found, 'Rust references across files', timeout=30)
     position(1, column); key('F12','F12',123,shift=True)
     browser.until('document.querySelector("#rust-references-dialog").open && document.querySelectorAll(".rust-reference-item").length === 2', 'Shift+F12 reference list')
     browser.script('Array.from(document.querySelectorAll(".rust-reference-item")).find(b=>b.textContent.includes("helper.rs")).click()')
