@@ -180,7 +180,8 @@ temporários para configurações, dados e cache. Encerra apenas os processos do
 teste. `--isolated-display` exige que o chamador forneça uma tela descartável:
 não use essa opção na sua sessão de trabalho. Os caminhos do binário, fixture,
 drivers e evidências aceitam as mesmas opções do outro runner; o transporte dos
-comandos WebDriver é direto ao driver nativo.
+comandos WebDriver é direto ao driver nativo. O workflow Quality executa a
+jornada em 100% e em 200%, com evidências em `target/e2e-input*/`.
 
 A jornada cobre abertura/cancelamento de pasta, criação por Tab/Enter, cancelamento
 e nova tentativa, Git inicial, fechamento do modal, edição/salvamento/desfazer,
